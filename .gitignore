@@ -1,0 +1,14 @@
+# Dados pessoais (tarefas, rotinas e backups) — ficam só no seu computador
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Editores / sistema
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

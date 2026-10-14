@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="author" content="Hasten-Coubath">
+  <title>Auto Reschedule</title>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+  <script>
+    // Aplica o tema salvo antes de desenhar a página (evita "piscar").
+    try {
+      const t = localStorage.getItem("ar-theme");
+      if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+    } catch (e) {}
+  </script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <img src="icon.svg" alt="" width="34" height="34">
+      <div>
+        <h1>Auto Reschedule</h1>
+        <p class="tagline">O que fica para trás vem junto.</p>
+      </div>
+    </div>
+
+    <nav class="daynav" aria-label="Navegar entre dias">
+      <button id="prev-day" class="icon-btn" title="Dia anterior (←)" aria-label="Dia anterior">
+        <svg viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg>
+      </button>
+      <label class="day-label" title="Escolher uma data">
+        <span id="day-title">…</span>
+        <span id="day-sub"></span>
+        <input type="date" id="day-picker" aria-label="Escolher data">
+      </label>
+      <button id="next-day" class="icon-btn" title="Próximo dia (→)" aria-label="Próximo dia">
+        <svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>
+      </button>
+      <button id="go-today" class="btn ghost small" hidden>Hoje</button>
+    </nav>
+
+    <div class="top-actions">
+      <button id="theme-toggle" class="icon-btn" title="Alternar tema claro/escuro" aria-label="Alternar tema">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 0 0 16z" class="fill"/></svg>
+      </button>
+      <button id="app-menu-btn" class="icon-btn" title="Mais opções" aria-label="Mais opções">
+        <svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.6" class="fill"/><circle cx="12" cy="12" r="1.6" class="fill"/><circle cx="19" cy="12" r="1.6" class="fill"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <div id="banner" class="banner" hidden></div>
+  <section id="summary" class="summary" aria-live="polite"></section>
+
+  <main class="columns">
+    <section class="panel" aria-labelledby="routines-title">
+      <div class="panel-head">
+        <div>
+          <h2 id="routines-title">Rotinas acumulativas</h2>
+          <p class="panel-hint">Metas diárias: o que faltar soma no dia seguinte, o que sobrar vira saldo.</p>
+        </div>
+        <button class="btn primary" id="new-routine">+ Nova rotina</button>
+      </div>
+      <div id="routine-list" class="routine-list"></div>
+    </section>
+
+    <section class="panel" aria-labelledby="tasks-title">
+      <div class="panel-head">
+        <div>
+          <h2 id="tasks-title">Tarefas</h2>
+          <p class="panel-hint">Não concluiu? Ela passa sozinha para o dia seguinte.</p>
+        </div>
+      </div>
+      <form id="task-form" class="task-form" autocomplete="off">
+        <input id="task-title" placeholder="Adicionar tarefa… (Enter para salvar)" maxlength="200" required>
+        <input id="task-date" type="date" title="Data da tarefa" aria-label="Data da tarefa">
+        <button class="btn primary" type="submit">Adicionar</button>
+      </form>
+      <ul id="task-list" class="task-list"></ul>
+    </section>
+  </main>
+
+  <footer class="footer">
+    Auto Reschedule · feito por <strong>Hasten-Coubath</strong> · seus dados ficam só no seu computador
+  </footer>
+
+  <dialog id="modal" class="modal">
+    <form id="modal-form" method="dialog" novalidate>
+      <header class="modal-head">
+        <h3 id="modal-title"></h3>
+        <button type="button" class="icon-btn" data-close aria-label="Fechar">
+          <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </header>
+      <div id="modal-body" class="modal-body"></div>
+      <p id="modal-error" class="form-error" hidden></p>
+      <footer class="modal-foot">
+        <button type="button" class="btn ghost" data-close>Cancelar</button>
+        <button type="submit" class="btn primary" id="modal-submit">Salvar</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <div id="menu" class="menu" role="menu" hidden></div>
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
