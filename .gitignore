@@ -12,3 +12,8 @@ venv/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Executável gerado pelo PyInstaller
+build/
+dist/
+*.spec

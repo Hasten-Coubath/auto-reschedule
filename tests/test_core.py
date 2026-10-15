@@ -2,7 +2,7 @@
 
 import sys
 import unittest
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -247,6 +247,206 @@ class TaskRolloverTests(unittest.TestCase):
         self.assertEqual(state["summary"]["tasks_late"], 1)
         self.assertEqual(state["summary"]["routines_open"], 1)
         self.assertEqual(state["routines"][0]["day"]["required"], 180)
+
+    def test_priority_comes_first_among_open_tasks(self):
+        low = core.make_task({"title": "Baixa", "date": d(0).isoformat(), "priority": "low"}, default_date=MON)
+        normal = self.make(0)
+        high = core.make_task({"title": "Alta", "date": d(0).isoformat(), "priority": "high"}, default_date=MON)
+        state = core.build_state({"tasks": [low, normal, high], "routines": []}, d(0), d(0))
+        self.assertEqual([t["id"] for t in state["tasks"]], [high["id"], normal["id"], low["id"]])
+        self.assertEqual(state["summary"]["tasks_high"], 1)
+        with self.assertRaises(core.ValidationError):
+            core.make_task({"title": "x", "priority": "urgente"}, default_date=MON)
+
+    def test_tags_are_cleaned(self):
+        t = core.make_task({"title": "x", "tags": "#Faculdade, faculdade,  casa ,,"}, default_date=MON)
+        self.assertEqual(t["tags"], ["Faculdade", "casa"])
+        state = core.build_state({"tasks": [t], "routines": []}, d(0), d(0))
+        self.assertEqual(state["tags"], ["casa", "Faculdade"])
+        with self.assertRaises(core.ValidationError):
+            core.make_task({"title": "x", "tags": ["a" * 31]}, default_date=MON)
+
+
+class SubtaskTests(unittest.TestCase):
+    def make(self, **kw):
+        data = {"title": "Trabalho de BD", "date": MON.isoformat(), "subtasks": ["Modelo ER", "Scripts SQL"]}
+        data.update(kw)
+        return core.make_task(data, default_date=MON)
+
+    def toggle(self, t, index, offset, **kw):
+        return core.toggle_subtask(t, t["subtasks"][index]["id"], {"date": d(offset).isoformat(), **kw}, today_=d(offset))
+
+    def test_completing_all_subtasks_completes_the_task(self):
+        t = self.make()
+        self.assertIsNone(self.toggle(t, 0, 0))
+        view = core.task_view(t, d(0), d(0))
+        self.assertEqual([s["done"] for s in view["subtasks"]], [True, False])
+        self.assertEqual(view["status"], "pending")
+        self.assertEqual(self.toggle(t, 1, 1), "completed")
+        self.assertEqual(t["completed_on"], d(1).isoformat())
+        # Desmarcar uma subtarefa reabre a tarefa.
+        self.assertEqual(self.toggle(t, 0, 1), "reopened")
+        self.assertIsNone(t["completed_on"])
+
+    def test_subtask_progress_is_shown_by_day(self):
+        t = self.make()
+        self.toggle(t, 0, 2)
+        self.assertFalse(core.task_view(t, d(1), d(2))["subtasks"][0]["done"])
+        self.assertTrue(core.task_view(t, d(2), d(2))["subtasks"][0]["done"])
+
+    def test_edit_subtasks_keeps_state(self):
+        t = self.make()
+        self.toggle(t, 0, 0)
+        first = t["subtasks"][0]
+        core.update_task(t, {"subtasks": [{"id": first["id"], "title": "Modelo ER v2"}, "Relatório"]})
+        self.assertEqual([s["title"] for s in t["subtasks"]], ["Modelo ER v2", "Relatório"])
+        self.assertEqual(t["subtasks"][0]["done_on"], d(0).isoformat())
+        core.add_subtask(t, {"title": "Slides"})
+        core.remove_subtask(t, first["id"])
+        self.assertEqual([s["title"] for s in t["subtasks"]], ["Relatório", "Slides"])
+
+
+class RecurringTaskTests(unittest.TestCase):
+    def make(self, repeat, offset=0):
+        return core.make_task({"title": "Lavar roupa", "date": d(offset).isoformat(), "repeat": repeat}, default_date=MON)
+
+    def test_weekly_missed_occurrence_is_replaced_not_accumulated(self):
+        t = self.make({"type": "weekly", "weekdays": [0, 3]})  # seg e qui
+        today_ = d(4)  # sexta
+        self.assertEqual(core.task_view(t, d(1), today_)["status"], "rolled")  # ter: segue até qui
+        self.assertEqual(core.task_view(t, d(2), today_)["status"], "missed")  # qua: quinta substitui
+        view = core.task_view(t, today_, today_)
+        self.assertEqual(view["due"], d(3).isoformat())  # só a repetição de quinta está pendente
+        self.assertEqual(view["days_late"], 1)
+        self.assertEqual(view["next_occurrence"], d(7).isoformat())
+
+    def test_completing_an_occurrence(self):
+        t = self.make({"type": "interval", "every": 2})
+        core.complete_task(t, d(1), today_=d(1))  # repetição de seg feita na ter
+        self.assertEqual(core.task_view(t, d(1), d(1))["status"], "done")
+        self.assertEqual(core.task_view(t, d(2), d(2))["status"], "pending")  # nova repetição na qua
+        core.reopen_task(t, d(1))
+        self.assertEqual(core.task_view(t, d(1), d(1))["status"], "pending")
+
+    def test_cannot_complete_before_the_first_occurrence(self):
+        t = self.make({"type": "weekly", "weekdays": [4]}, offset=0)  # só sextas, hoje é segunda
+        self.assertIsNone(core.task_view(t, d(0), d(0)))
+        view = core.task_view(t, d(4), d(0))
+        self.assertEqual(view["status"], "planned")
+        self.assertFalse(view["can_complete"])
+        with self.assertRaises(core.ValidationError):
+            core.complete_task(t, d(4), today_=d(0))
+
+    def test_monthly_uses_last_day_of_short_months(self):
+        t = core.make_task(
+            {"title": "Pagar aluguel", "date": "2027-01-31", "repeat": {"type": "monthly", "day": 31}}, default_date=MON
+        )
+        self.assertTrue(core.occurs_on(t, date(2027, 2, 28)))
+        self.assertFalse(core.occurs_on(t, date(2027, 2, 27)))
+        self.assertTrue(core.occurs_on(t, date(2027, 3, 31)))
+
+    def test_until_stops_new_occurrences(self):
+        t = self.make({"type": "interval", "every": 1, "until": d(2).isoformat()})
+        core.complete_task(t, d(2), today_=d(2))
+        self.assertIsNone(core.task_view(t, d(3), d(3)))
+        with self.assertRaises(core.ValidationError):
+            self.make({"type": "weekly", "weekdays": [0], "until": d(-1).isoformat()})
+
+    def test_subtasks_reset_on_each_occurrence(self):
+        t = self.make({"type": "weekly", "weekdays": [0]})
+        core.add_subtask(t, {"title": "Separar"})
+        core.add_subtask(t, {"title": "Estender"})
+        for sub in t["subtasks"]:
+            core.toggle_subtask(t, sub["id"], {"date": d(0).isoformat()}, today_=d(0))
+        self.assertEqual(core.task_view(t, d(0), d(0))["status"], "done")
+        view = core.task_view(t, d(7), d(7))
+        self.assertEqual(view["status"], "pending")
+        self.assertEqual([s["done"] for s in view["subtasks"]], [False, False])
+
+    def test_turning_off_repeat(self):
+        t = self.make({"type": "interval", "every": 1})
+        core.complete_task(t, d(0), today_=d(0))
+        core.update_task(t, {"repeat": None})
+        self.assertIsNone(t["repeat"])
+        self.assertEqual(t["completions"], {})
+
+
+class TimerTests(unittest.TestCase):
+    T0 = datetime(2026, 10, 12, 9, 0, 0)
+
+    def at(self, minutes):
+        return self.T0 + timedelta(minutes=minutes)
+
+    def test_start_pause_resume_stop(self):
+        r = routine()
+        core.timer_start(r, today_=MON, at=self.at(0))
+        core.timer_pause(r, at=self.at(20))
+        self.assertEqual(core.timer_elapsed(r["timer"], self.at(50)), 20 * 60)
+        core.timer_start(r, today_=MON, at=self.at(30))
+        entry = core.timer_stop(r, {}, today_=MON, at=self.at(75))
+        self.assertEqual(entry["amount"], 65)
+        self.assertEqual(entry["source"], "timer")
+        self.assertIsNone(r["timer"])
+        self.assertEqual(snap(r, 0)["credit_out"], 5)  # passou da meta: vira saldo
+
+    def test_stop_with_corrected_amount_and_on_start_day(self):
+        r = routine()
+        core.timer_start(r, today_=MON, at=self.at(0))
+        # Esqueceu ligado de um dia para o outro: corrige para 50 min.
+        entry = core.timer_stop(r, {"amount": 50}, today_=d(1), at=self.at(60 * 20))
+        self.assertEqual(entry["date"], MON.isoformat())
+        self.assertEqual(snap(r, 0)["remaining"], 10)
+
+    def test_short_timer_records_nothing(self):
+        r = routine()
+        core.timer_start(r, today_=MON, at=self.at(0))
+        self.assertIsNone(core.timer_stop(r, {}, today_=MON, at=self.T0 + timedelta(seconds=20)))
+        self.assertEqual(r["entries"], [])
+
+    def test_invalid_timer_actions(self):
+        r = routine()
+        with self.assertRaises(core.ValidationError):
+            core.timer_pause(r, at=self.at(0))
+        core.timer_start(r, today_=MON, at=self.at(0))
+        with self.assertRaises(core.ValidationError):
+            core.timer_start(r, today_=MON, at=self.at(1))
+        core.timer_cancel(r)
+        self.assertIsNone(r["timer"])
+        with self.assertRaises(core.ValidationError):
+            core.timer_start(routine(unit="count", unit_label="páginas"), today_=MON, at=self.at(0))
+
+    def test_active_timers_in_state(self):
+        r = routine()
+        log(r, 0, 15)
+        core.timer_start(r, today_=MON, at=self.at(0))
+        state = core.build_state({"tasks": [], "routines": [r]}, MON, MON, at=self.at(10))
+        (timer,) = state["timers"]
+        self.assertEqual(timer["remaining"], 45)
+        self.assertEqual(timer["elapsed_now"], 600)
+
+
+class SettingsAndMigrationTests(unittest.TestCase):
+    def test_settings(self):
+        data = {}
+        self.assertEqual(core.settings_of(data)["notify_time"], "20:00")
+        core.update_settings(data, {"notify_time": "21:30", "sound": False})
+        self.assertEqual(data["settings"]["notify_time"], "21:30")
+        self.assertFalse(core.settings_of(data)["sound"])
+        with self.assertRaises(core.ValidationError):
+            core.update_settings(data, {"notify_time": "25:00"})
+
+    def test_old_files_are_migrated(self):
+        from autoreschedule.storage import migrate
+
+        old = {
+            "version": 1,
+            "tasks": [{"id": "a1", "title": "Antiga", "notes": "", "date": MON.isoformat(), "completed_on": None, "created_at": "x"}],
+            "routines": [],
+        }
+        data = migrate(old)
+        self.assertEqual(data["version"], 2)
+        view = core.task_view(data["tasks"][0], d(1), d(1))
+        self.assertEqual((view["priority"], view["tags"], view["subtasks"]), ("normal", [], []))
 
 
 if __name__ == "__main__":

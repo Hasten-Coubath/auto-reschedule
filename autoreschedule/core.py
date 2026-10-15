@@ -4,7 +4,9 @@ Existem dois tipos de item:
 
 * **Tarefas** (``tasks``): têm uma data. Enquanto não forem concluídas,
   continuam aparecendo em todos os dias seguintes, com a indicação de há
-  quantos dias estão atrasadas.
+  quantos dias estão atrasadas. Podem ter prioridade, etiquetas, subtarefas
+  e se repetir (tarefas recorrentes simples, sem acúmulo: cada repetição
+  pendente passa para o dia seguinte só até a próxima repetição chegar).
 * **Rotinas acumulativas** (``routines``): têm uma meta por dia (ex.: 60 min
   de estudo). O que não for feito vira *dívida* e soma na meta do dia
   seguinte; o que for feito a mais vira *saldo*, que pode ser gasto depois
@@ -17,8 +19,10 @@ fechado. Este módulo é puro (sem I/O) para facilitar os testes.
 
 from __future__ import annotations
 
+import calendar
 import math
 import os
+import re
 import uuid
 from datetime import date, datetime, timedelta
 
@@ -27,7 +31,19 @@ ALL_WEEKDAYS = [0, 1, 2, 3, 4, 5, 6]  # 0 = segunda ... 6 = domingo
 UNITS = ("time", "count")  # "time" é medido em minutos
 ENTRY_TYPES = ("progress", "spend", "skip")
 
-TASK_ORDER = {"pending": 0, "rolled": 0, "planned": 0, "done": 1}
+TASK_ORDER = {"pending": 0, "rolled": 0, "missed": 0, "planned": 0, "done": 1}
+PRIORITIES = ("high", "normal", "low")
+PRIORITY_ORDER = {"high": 0, "normal": 1, "low": 2}
+MAX_TAGS = 10
+MAX_SUBTASKS = 50
+REPEAT_LOOKBACK = 400  # quantos dias a busca da repetição vigente olha para trás
+
+DEFAULT_SETTINGS = {
+    "notify_end_of_day": True,  # lembrete do que ficou pendente no fim do dia
+    "notify_time": "20:00",
+    "notify_timer": True,  # avisa quando o cronômetro atinge a meta do dia
+    "sound": True,
+}
 
 
 class ValidationError(ValueError):
@@ -64,8 +80,12 @@ def new_id() -> str:
     return uuid.uuid4().hex[:12]
 
 
+def now() -> datetime:
+    return datetime.now().replace(microsecond=0)
+
+
 def now_iso() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    return now().isoformat(timespec="seconds")
 
 
 def _num(value: float) -> float:
@@ -117,6 +137,47 @@ def _clean_weekdays(value) -> list[int]:
     return days
 
 
+def _clean_priority(value) -> str:
+    priority = value or "normal"
+    if priority not in PRIORITIES:
+        raise ValidationError("Prioridade inválida (use 'high', 'normal' ou 'low').")
+    return priority
+
+
+def _clean_tags(value) -> list[str]:
+    """Aceita lista ou texto separado por vírgulas. Remove '#', vazios e repetidos."""
+    if value is None or value == "":
+        return []
+    if isinstance(value, str):
+        value = value.split(",")
+    if not isinstance(value, list):
+        raise ValidationError("Etiquetas inválidas.")
+    tags: list[str] = []
+    seen: set[str] = set()
+    for raw in value:
+        tag = re.sub(r"\s+", " ", str(raw or "").strip().lstrip("#").strip())
+        if not tag:
+            continue
+        if len(tag) > 30:
+            raise ValidationError("Cada etiqueta pode ter no máximo 30 caracteres.")
+        if tag.casefold() not in seen:
+            seen.add(tag.casefold())
+            tags.append(tag)
+    if len(tags) > MAX_TAGS:
+        raise ValidationError(f"Use no máximo {MAX_TAGS} etiquetas por tarefa.")
+    return tags
+
+
+def _clean_int(value, what: str, low: int, high: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        raise ValidationError(f"{what} inválido.") from None
+    if not low <= number <= high:
+        raise ValidationError(f"{what} deve estar entre {low} e {high}.")
+    return number
+
+
 def find(items: list[dict], item_id: str, what: str) -> dict:
     for item in items:
         if item["id"] == item_id:
@@ -129,15 +190,74 @@ def find(items: list[dict], item_id: str, what: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _clean_repeat(value, start: date) -> dict | None:
+    """Regra de repetição: semanal (dias da semana), mensal (dia do mês) ou a cada N dias."""
+    if not value:
+        return None
+    if not isinstance(value, dict):
+        raise ValidationError("Repetição inválida.")
+    kind = value.get("type")
+    if kind == "weekly":
+        repeat = {"type": "weekly", "weekdays": _clean_weekdays(value.get("weekdays", ALL_WEEKDAYS))}
+    elif kind == "monthly":
+        repeat = {"type": "monthly", "day": _clean_int(value.get("day", start.day), "Dia do mês", 1, 31)}
+    elif kind == "interval":
+        repeat = {"type": "interval", "every": _clean_int(value.get("every", 1), "Intervalo de dias", 1, 365)}
+    else:
+        raise ValidationError("Tipo de repetição inválido (use 'weekly', 'monthly' ou 'interval').")
+    until = value.get("until")
+    repeat["until"] = None
+    if until:
+        until = parse_date(until)
+        if until < start:
+            raise ValidationError("O fim da repetição é anterior ao início.")
+        repeat["until"] = until.isoformat()
+    return repeat
+
+
+def _make_subtask(title) -> dict:
+    return {"id": new_id(), "title": _clean_title(title), "done_on": None}
+
+
+def _set_subtasks(task: dict, items) -> None:
+    """Substitui a lista de subtarefas, mantendo o estado das que já existiam (pelo id)."""
+    if not isinstance(items, list):
+        raise ValidationError("Subtarefas inválidas.")
+    if len(items) > MAX_SUBTASKS:
+        raise ValidationError(f"Use no máximo {MAX_SUBTASKS} subtarefas.")
+    current = {sub["id"]: sub for sub in task.get("subtasks", [])}
+    result = []
+    for item in items:
+        if isinstance(item, str):
+            item = {"title": item}
+        if not isinstance(item, dict):
+            raise ValidationError("Subtarefa inválida.")
+        existing = current.get(item.get("id"))
+        if existing:
+            existing["title"] = _clean_title(item.get("title", existing["title"]))
+            result.append(existing)
+        else:
+            result.append(_make_subtask(item.get("title")))
+    task["subtasks"] = result
+
+
 def make_task(data: dict, *, default_date: date) -> dict:
-    return {
+    start = parse_date(data.get("date") or default_date)
+    task = {
         "id": new_id(),
         "title": _clean_title(data.get("title")),
         "notes": _clean_notes(data.get("notes")),
-        "date": parse_date(data.get("date") or default_date).isoformat(),
+        "date": start.isoformat(),
+        "priority": _clean_priority(data.get("priority")),
+        "tags": _clean_tags(data.get("tags")),
+        "subtasks": [],
+        "repeat": _clean_repeat(data.get("repeat"), start),
         "completed_on": None,
+        "completions": {},  # só para recorrentes: {data da repetição: dia em que foi feita}
         "created_at": now_iso(),
     }
+    _set_subtasks(task, data.get("subtasks") or [])
+    return task
 
 
 def update_task(task: dict, data: dict) -> None:
@@ -145,24 +265,150 @@ def update_task(task: dict, data: dict) -> None:
         task["title"] = _clean_title(data["title"])
     if "notes" in data:
         task["notes"] = _clean_notes(data["notes"])
+    if "priority" in data:
+        task["priority"] = _clean_priority(data["priority"])
+    if "tags" in data:
+        task["tags"] = _clean_tags(data["tags"])
+    if "subtasks" in data:
+        _set_subtasks(task, data["subtasks"])
     if "date" in data:
         new_date = parse_date(data["date"]).isoformat()
         if new_date != task["date"] and task.get("completed_on"):
             raise ValidationError("Desmarque a tarefa como concluída antes de mudar a data.")
         task["date"] = new_date
+    if "repeat" in data or ("date" in data and task.get("repeat")):
+        repeat = _clean_repeat(data.get("repeat", task.get("repeat")), parse_date(task["date"]))
+        if repeat and task.get("completed_on"):
+            raise ValidationError("Desmarque a tarefa como concluída antes de fazê-la se repetir.")
+        if not repeat:
+            task["completions"] = {}
+        task["repeat"] = repeat
+
+
+def occurs_on(task: dict, day: date) -> bool:
+    """A tarefa recorrente tem uma repetição marcada para ``day``?"""
+    repeat = task["repeat"]
+    start = parse_date(task["date"])
+    if day < start or (repeat.get("until") and day > parse_date(repeat["until"])):
+        return False
+    kind = repeat["type"]
+    if kind == "weekly":
+        return day.weekday() in repeat["weekdays"]
+    if kind == "interval":
+        return (day - start).days % repeat["every"] == 0
+    last_day = calendar.monthrange(day.year, day.month)[1]
+    return day.day == min(repeat["day"], last_day)
+
+
+def occurrence_for(task: dict, day: date) -> date | None:
+    """Repetição vigente em ``day``: a mais recente que já chegou."""
+    lower = max(parse_date(task["date"]), day - timedelta(days=REPEAT_LOOKBACK))
+    probe = day
+    while probe >= lower:
+        if occurs_on(task, probe):
+            return probe
+        probe -= timedelta(days=1)
+    return None
+
+
+def next_occurrence(task: dict, day: date) -> date | None:
+    probe = day + timedelta(days=1)
+    for _ in range(REPEAT_LOOKBACK):
+        if occurs_on(task, probe):
+            return probe
+        probe += timedelta(days=1)
+    return None
+
+
+def _period(task: dict, day: date) -> tuple[date | None, date | None]:
+    """(data de referência, dia em que foi concluída) da tarefa vista em ``day``.
+
+    Para tarefas comuns a referência é a data da tarefa; para recorrentes, a
+    repetição vigente naquele dia.
+    """
+    if task.get("repeat"):
+        occ = occurrence_for(task, day)
+        if occ is None:
+            return None, None
+        done = task.get("completions", {}).get(occ.isoformat())
+        return occ, parse_date(done) if done else None
+    done = task.get("completed_on")
+    return parse_date(task["date"]), parse_date(done) if done else None
 
 
 def complete_task(task: dict, on: date, today_: date) -> None:
     """Marca como concluída no dia ``on`` (nunca no futuro)."""
     on = min(on, today_)
+    if task.get("repeat"):
+        occ = occurrence_for(task, on)
+        if occ is None:
+            raise ValidationError("Essa repetição ainda não chegou.")
+        task.setdefault("completions", {})[occ.isoformat()] = on.isoformat()
+        return
     if on < parse_date(task["date"]):
         # Feita antes da data planejada: passa a contar no dia em que foi feita.
         task["date"] = on.isoformat()
     task["completed_on"] = on.isoformat()
 
 
-def reopen_task(task: dict) -> None:
+def reopen_task(task: dict, day: date | None = None) -> None:
+    if task.get("repeat"):
+        occ = occurrence_for(task, day or today())
+        if occ is not None:
+            task.get("completions", {}).pop(occ.isoformat(), None)
+        return
     task["completed_on"] = None
+
+
+def _subtask_floor(task: dict, day: date) -> date | None:
+    """Nas recorrentes, as subtarefas "zeram" a cada nova repetição."""
+    return occurrence_for(task, day) if task.get("repeat") else None
+
+
+def _subtask_done(sub: dict, floor: date | None, day: date) -> bool:
+    if not sub.get("done_on"):
+        return False
+    done = parse_date(sub["done_on"])
+    return done <= day and (floor is None or done >= floor)
+
+
+def add_subtask(task: dict, data: dict) -> dict:
+    if len(task.get("subtasks", [])) >= MAX_SUBTASKS:
+        raise ValidationError(f"Use no máximo {MAX_SUBTASKS} subtarefas.")
+    sub = _make_subtask(data.get("title"))
+    task.setdefault("subtasks", []).append(sub)
+    return sub
+
+
+def remove_subtask(task: dict, sub_id: str) -> None:
+    task["subtasks"].remove(find(task.get("subtasks", []), sub_id, "Subtarefa"))
+
+
+def toggle_subtask(task: dict, sub_id: str, data: dict, *, today_: date) -> str | None:
+    """Marca/desmarca uma subtarefa no dia ``data['date']`` (nunca no futuro).
+
+    Quando todas ficam marcadas a tarefa é concluída sozinha; desmarcar uma
+    subtarefa de uma tarefa concluída a reabre. Devolve ``"completed"``,
+    ``"reopened"`` ou ``None`` para a interface avisar o que aconteceu.
+    """
+    sub = find(task.get("subtasks", []), sub_id, "Subtarefa")
+    day = min(parse_date(data.get("date") or today_), today_)
+    floor = _subtask_floor(task, day)
+    if task.get("repeat") and floor is None:
+        raise ValidationError("Essa repetição ainda não chegou.")
+    done = data.get("done")
+    if done is None:
+        done = not _subtask_done(sub, floor, day)
+    sub["done_on"] = day.isoformat() if done else None
+
+    _, task_done = _period(task, day)
+    if done and task_done is None and all(_subtask_done(s, floor, day) for s in task["subtasks"]):
+        complete_task(task, day, today_)
+        return "completed"
+    if not done and task_done is not None:
+        reopen_task(task, day)
+        return "reopened"
+    return None
 
 
 def task_view(task: dict, day: date, today_: date) -> dict | None:
@@ -172,24 +418,47 @@ def task_view(task: dict, day: date, today_: date) -> dict | None:
     * ``done``    – concluída neste dia;
     * ``pending`` – hoje, ainda por fazer;
     * ``rolled``  – dia passado em que ficou pendente e foi para o dia seguinte;
+    * ``missed``  – (recorrente) dia passado em que ficou pendente e foi
+      substituída pela repetição seguinte (não acumula);
     * ``planned`` – dia futuro.
     """
-    due = parse_date(task["date"])
-    if day < due:
+    due, done_on = _period(task, day)
+    if due is None or day < due:
         return None
-    done_on = parse_date(task["completed_on"]) if task.get("completed_on") else None
     if done_on is not None and done_on < day:
         return None
 
     if done_on == day:
         status = "done"
     elif day < today_:
-        status = "rolled"
+        replaced = task.get("repeat") and occurs_on(task, day + timedelta(days=1))
+        status = "missed" if replaced else "rolled"
     elif day == today_:
         status = "pending"
     else:
         status = "planned"
-    return {**task, "status": status, "days_late": (day - due).days}
+
+    floor = _subtask_floor(task, day)
+    view = {k: v for k, v in task.items() if k != "completions"}
+    view.update(
+        {
+            "priority": task.get("priority", "normal"),
+            "tags": task.get("tags", []),
+            "repeat": task.get("repeat"),
+            "subtasks": [
+                {"id": sub["id"], "title": sub["title"], "done": _subtask_done(sub, floor, day)}
+                for sub in task.get("subtasks", [])
+            ],
+            "status": status,
+            "due": due.isoformat(),
+            "days_late": (day - due).days,
+            "can_complete": due <= today_,
+        }
+    )
+    if task.get("repeat"):
+        upcoming = next_occurrence(task, day)
+        view["next_occurrence"] = upcoming.isoformat() if upcoming else None
+    return view
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +490,7 @@ def make_routine(data: dict, *, today_: date) -> dict:
         "auto_use_balance": bool(data.get("auto_use_balance", False)),
         "pauses": [],
         "entries": [],
+        "timer": None,
         "created_at": now_iso(),
     }
 
@@ -456,6 +726,109 @@ def remove_entry(routine: dict, entry_id: str) -> None:
     routine["entries"].remove(entry)
 
 
+# -- Cronômetro ---------------------------------------------------------------
+#
+# O cronômetro fica salvo na própria rotina (``routine["timer"]``), então
+# continua contando mesmo que a janela seja fechada ou o PC reiniciado:
+#
+#   {"id", "date": dia em que foi iniciado, "started_at",
+#    "running_since": quando voltou a rodar (None = pausado),
+#    "elapsed": segundos acumulados antes de ``running_since``}
+#
+# Ao parar, o tempo vira um registro de progresso normal no dia em que o
+# cronômetro foi iniciado.
+
+
+def timer_elapsed(timer: dict, at: datetime) -> float:
+    """Segundos contados pelo cronômetro até ``at``."""
+    elapsed = float(timer.get("elapsed", 0.0))
+    if timer.get("running_since"):
+        elapsed += max(0.0, (at - datetime.fromisoformat(timer["running_since"])).total_seconds())
+    return elapsed
+
+
+def _require_timer(routine: dict) -> dict:
+    timer = routine.get("timer")
+    if not timer:
+        raise ValidationError("O cronômetro desta rotina não está ligado.")
+    return timer
+
+
+def timer_start(routine: dict, *, today_: date, at: datetime) -> dict:
+    """Liga o cronômetro (ou retoma, se estiver pausado)."""
+    if routine["unit"] != "time":
+        raise ValidationError("O cronômetro só funciona em rotinas medidas em tempo.")
+    timer = routine.get("timer")
+    if timer:
+        if timer.get("running_since"):
+            raise ValidationError("O cronômetro já está rodando.")
+        timer["running_since"] = at.isoformat(timespec="seconds")
+        return timer
+    if today_ < parse_date(routine["start_date"]):
+        raise ValidationError("Esta rotina ainda não começou.")
+    stamp = at.isoformat(timespec="seconds")
+    routine["timer"] = {"id": new_id(), "date": today_.isoformat(), "started_at": stamp, "running_since": stamp, "elapsed": 0.0}
+    return routine["timer"]
+
+
+def timer_pause(routine: dict, *, at: datetime) -> dict:
+    timer = _require_timer(routine)
+    if not timer.get("running_since"):
+        raise ValidationError("O cronômetro já está pausado.")
+    timer["elapsed"] = round(timer_elapsed(timer, at), 3)
+    timer["running_since"] = None
+    return timer
+
+
+def timer_stop(routine: dict, data: dict, *, today_: date, at: datetime) -> dict | None:
+    """Desliga o cronômetro e registra o tempo como progresso.
+
+    ``data['amount']`` (minutos) permite corrigir o tempo antes de salvar, por
+    exemplo se o cronômetro ficou ligado depois de terminar a atividade. Sem
+    ele, vale o tempo contado, arredondado para minutos inteiros. Devolve o
+    registro criado (ou ``None`` se deu menos de meio minuto).
+    """
+    timer = _require_timer(routine)
+    requested = data.get("amount")
+    if requested in (None, ""):
+        amount = float(round(timer_elapsed(timer, at) / 60))
+    else:
+        amount = _clean_amount(requested, "Tempo")
+    entry = None
+    if amount > EPS:
+        day = min(parse_date(timer["date"]), today_)
+        entry = add_entry(routine, {"type": "progress", "date": day.isoformat(), "amount": amount}, today_=today_)
+        entry["source"] = "timer"
+    routine["timer"] = None
+    return entry
+
+
+def timer_cancel(routine: dict) -> None:
+    _require_timer(routine)
+    routine["timer"] = None
+
+
+# -- Configurações -------------------------------------------------------------
+
+
+def settings_of(data: dict) -> dict:
+    return {**DEFAULT_SETTINGS, **data.get("settings", {})}
+
+
+def update_settings(data: dict, changes: dict) -> dict:
+    settings = settings_of(data)
+    for key in ("notify_end_of_day", "notify_timer", "sound"):
+        if key in changes:
+            settings[key] = bool(changes[key])
+    if "notify_time" in changes:
+        value = str(changes["notify_time"] or "").strip()
+        if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", value):
+            raise ValidationError("Horário inválido (use HH:MM, ex.: 20:00).")
+        settings["notify_time"] = value
+    data["settings"] = settings
+    return settings
+
+
 def _public(routine: dict) -> dict:
     return {k: v for k, v in routine.items() if k != "entries"}
 
@@ -492,23 +865,59 @@ def routine_history(routine: dict, until: date, limit: int = 30) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def build_state(data: dict, day: date, today_: date) -> dict:
+def active_timers(data: dict, at: datetime) -> list[dict]:
+    """Cronômetros ligados, com o que faltava da meta no dia em que começaram."""
+    timers = []
+    for routine in data["routines"]:
+        timer = routine.get("timer")
+        if not timer:
+            continue
+        snap = snapshot_on(routine, parse_date(timer["date"]))
+        timers.append(
+            {
+                "routine_id": routine["id"],
+                "title": routine["title"],
+                **timer,
+                "elapsed_now": round(timer_elapsed(timer, at), 3),
+                "remaining": snap["remaining"] if snap else 0.0,
+                "required": snap["required"] if snap else 0.0,
+            }
+        )
+    return timers
+
+
+def build_state(data: dict, day: date, today_: date, at: datetime | None = None) -> dict:
+    at = at or now()
     tasks = [view for t in data["tasks"] if (view := task_view(t, day, today_))]
-    tasks.sort(key=lambda t: (TASK_ORDER[t["status"]], -t["days_late"], t["created_at"]))
+    tasks.sort(
+        key=lambda t: (
+            TASK_ORDER[t["status"]],
+            PRIORITY_ORDER.get(t["priority"], 1),
+            -t["days_late"],
+            t["created_at"],
+        )
+    )
 
     routines = [view for r in data["routines"] if (view := routine_view(r, day, today_))]
     routines.sort(key=lambda r: (r["day"]["remaining"] <= EPS, r["created_at"]))
+
+    tags = {tag.casefold(): tag for t in data["tasks"] for tag in t.get("tags", [])}
 
     open_tasks = [t for t in tasks if t["status"] != "done"]
     open_routines = [r for r in routines if r["day"]["remaining"] > EPS]
     return {
         "today": today_.isoformat(),
         "date": day.isoformat(),
+        "now": at.isoformat(timespec="seconds"),
         "tasks": tasks,
         "routines": routines,
+        "timers": active_timers(data, at),
+        "tags": sorted(tags.values(), key=str.casefold),
+        "settings": settings_of(data),
         "summary": {
             "tasks_open": len(open_tasks),
             "tasks_late": sum(1 for t in open_tasks if t["days_late"] > 0),
+            "tasks_high": sum(1 for t in open_tasks if t["priority"] == "high"),
             "tasks_done": len(tasks) - len(open_tasks),
             "routines_open": len(open_routines),
             "routines_total": len(routines),

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import re
+import sys
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -19,12 +20,23 @@ from . import core
 from .storage import Store
 
 APP_ID = "auto-reschedule"
-WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+# No executável do PyInstaller os arquivos da interface ficam em sys._MEIPASS.
+WEB_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent)).resolve() / "web"
 MAX_BODY = 1_000_000
 # Pedidos que alteram dados precisam deste cabeçalho. Um site qualquer aberto
 # no navegador não consegue enviá-lo para cá sem permissão (CORS), o que
 # impede que páginas de terceiros mexam nas suas tarefas.
 GUARD_HEADER = "X-Auto-Reschedule"
+# O registro do Windows às vezes informa tipos errados (ex.: .js como text/plain).
+CONTENT_TYPES = {
+    ".html": "text/html",
+    ".css": "text/css",
+    ".js": "application/javascript",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".ico": "image/x-icon",
+    ".webmanifest": "application/manifest+json",
+}
 
 
 class ApiError(Exception):
@@ -46,11 +58,15 @@ class Api:
         add("GET", r"/api/state", self.get_state)
         add("GET", r"/api/export", self.export)
         add("POST", r"/api/shutdown", self.shutdown)
+        add("PATCH", r"/api/settings", self.update_settings)
         add("POST", r"/api/tasks", self.create_task)
         add("PATCH", r"/api/tasks/(?P<id>\w+)", self.update_task)
         add("DELETE", r"/api/tasks/(?P<id>\w+)", self.delete_task)
         add("POST", r"/api/tasks/(?P<id>\w+)/complete", self.complete_task)
         add("POST", r"/api/tasks/(?P<id>\w+)/reopen", self.reopen_task)
+        add("POST", r"/api/tasks/(?P<id>\w+)/subtasks", self.add_subtask)
+        add("DELETE", r"/api/tasks/(?P<id>\w+)/subtasks/(?P<sub>\w+)", self.remove_subtask)
+        add("POST", r"/api/tasks/(?P<id>\w+)/subtasks/(?P<sub>\w+)/toggle", self.toggle_subtask)
         add("POST", r"/api/routines", self.create_routine)
         add("PATCH", r"/api/routines/(?P<id>\w+)", self.update_routine)
         add("DELETE", r"/api/routines/(?P<id>\w+)", self.delete_routine)
@@ -59,6 +75,7 @@ class Api:
         add("DELETE", r"/api/routines/(?P<id>\w+)/entries/(?P<entry>\w+)", self.remove_entry)
         add("POST", r"/api/routines/(?P<id>\w+)/pause", self.pause_routine)
         add("POST", r"/api/routines/(?P<id>\w+)/resume", self.resume_routine)
+        add("POST", r"/api/routines/(?P<id>\w+)/timer/(?P<action>start|pause|stop|cancel)", self.timer)
 
     def _add(self, method: str, pattern: str, handler) -> None:
         self.routes.append((method, re.compile(pattern + r"/?"), handler))
@@ -106,6 +123,10 @@ class Api:
             threading.Thread(target=self.server.shutdown, daemon=True).start()
         return {"ok": True}
 
+    def update_settings(self, params, query, body):
+        with self.store.write() as data:
+            return core.update_settings(data, body)
+
     # -- tarefas ----------------------------------------------------------
 
     def create_task(self, params, query, body):
@@ -134,10 +155,28 @@ class Api:
             return task
 
     def reopen_task(self, params, query, body):
+        today_ = core.today()
         with self.store.write() as data:
             task = core.find(data["tasks"], params["id"], "Tarefa")
-            core.reopen_task(task)
+            core.reopen_task(task, core.parse_date(body.get("date") or today_))
             return task
+
+    def add_subtask(self, params, query, body):
+        with self.store.write() as data:
+            task = core.find(data["tasks"], params["id"], "Tarefa")
+            return core.add_subtask(task, body)
+
+    def remove_subtask(self, params, query, body):
+        with self.store.write() as data:
+            task = core.find(data["tasks"], params["id"], "Tarefa")
+            core.remove_subtask(task, params["sub"])
+            return {"ok": True}
+
+    def toggle_subtask(self, params, query, body):
+        today_ = core.today()
+        with self.store.write() as data:
+            task = core.find(data["tasks"], params["id"], "Tarefa")
+            return {"task_change": core.toggle_subtask(task, params["sub"], body, today_=today_)}
 
     # -- rotinas ----------------------------------------------------------
 
@@ -196,9 +235,23 @@ class Api:
             core.resume_routine(routine, today_=today_)
             return {"ok": True}
 
+    def timer(self, params, query, body):
+        today_, at = core.today(), core.now()
+        with self.store.write() as data:
+            routine = core.find(data["routines"], params["id"], "Rotina")
+            action = params["action"]
+            if action == "start":
+                return {"timer": core.timer_start(routine, today_=today_, at=at)}
+            if action == "pause":
+                return {"timer": core.timer_pause(routine, at=at)}
+            if action == "stop":
+                return {"entry": core.timer_stop(routine, body, today_=today_, at=at)}
+            core.timer_cancel(routine)
+            return {"ok": True}
+
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "AutoReschedule/1.0"
+    server_version = "AutoReschedule/1.1"
     api: Api  # definido em create_server
 
     def do_GET(self):
@@ -277,8 +330,8 @@ class Handler(BaseHTTPRequestHandler):
         if not target.is_relative_to(WEB_DIR) or not target.is_file():
             raise ApiError(HTTPStatus.NOT_FOUND, "Arquivo não encontrado.")
         data = target.read_bytes()
-        ctype = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
-        if ctype.startswith("text/") or ctype in ("application/javascript", "image/svg+xml"):
+        ctype = CONTENT_TYPES.get(target.suffix.lower()) or mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+        if ctype.startswith("text/") or ctype in ("application/javascript", "image/svg+xml", "application/manifest+json"):
             ctype += "; charset=utf-8"
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", ctype)

@@ -20,6 +20,9 @@ const state = {
   data: null,
   localDay: toISO(new Date()),
   taskDateFor: null,
+  filterTag: null, // etiqueta usada para filtrar a lista de tarefas
+  addingSubFor: null, // tarefa com o campo "adicionar subtarefa" aberto
+  loadedAt: 0, // performance.now() do último carregamento (base do cronômetro)
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -38,7 +41,16 @@ const ICONS = {
   download: '<svg viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>',
   info: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/></svg>',
   power: '<svg viewBox="0 0 24 24"><path d="M12 3v9M6.3 6.3a8 8 0 1 0 11.4 0"/></svg>',
+  timer: '<svg viewBox="0 0 24 24"><circle cx="12" cy="13.5" r="7.5"/><path d="M12 13.5V10M10 2.5h4M18.5 6.5l1.5-1.5"/></svg>',
+  stop: '<svg viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/></svg>',
+  repeat: '<svg viewBox="0 0 24 24"><path d="M17 2l3 3-3 3"/><path d="M4 11V9a4 4 0 0 1 4-4h12M7 22l-3-3 3-3"/><path d="M20 13v2a4 4 0 0 1-4 4H4"/></svg>',
+  flag: '<svg viewBox="0 0 24 24"><path d="M5 21V4M5 4h11l-2 4 2 4H5"/></svg>',
+  sublist: '<svg viewBox="0 0 24 24"><path d="M4 5h10M8 12h12M8 19h12M4 12h.01M4 19h.01"/></svg>',
+  gear: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>',
+  plus: '<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>',
 };
+
+const PRIORITY_LABEL = { high: "Alta", normal: "Normal", low: "Baixa" };
 
 // ---------------------------------------------------------------------------
 // Utilitários
@@ -145,6 +157,62 @@ function weekdaysText(days) {
   return days.map((d) => WEEKDAYS[d]).join(", ");
 }
 
+/** "00:42:07" */
+function fmtClock(seconds) {
+  const s = Math.max(0, Math.floor(seconds));
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${pad(Math.floor(s / 3600))}:${pad(Math.floor((s % 3600) / 60))}:${pad(s % 60)}`;
+}
+
+function repeatText(rep) {
+  if (!rep) return "";
+  let text;
+  if (rep.type === "weekly") {
+    const days = weekdaysText(rep.weekdays);
+    text = days === "todos os dias" ? "Todo dia" : days === "fins de semana" ? "Todo fim de semana" : `Toda ${days}`;
+  } else if (rep.type === "monthly") {
+    text = `Todo dia ${rep.day} do mês`;
+  } else {
+    text = rep.every === 1 ? "Todo dia" : `A cada ${rep.every} dias`;
+  }
+  return rep.until ? `${text} até ${shortDate(rep.until)}` : text;
+}
+
+/** "Entregar trabalho #faculdade !alta" -> título, etiquetas e prioridade. */
+function parseQuickTask(text) {
+  const tags = [];
+  let priority = null;
+  const title = String(text)
+    .replace(/(^|\s)#([\p{L}\p{N}_\-/.]+)/gu, (_, sp, tag) => {
+      tags.push(tag);
+      return sp;
+    })
+    .replace(/(^|\s)!(alta|baixa|!)?(?=\s|$)/giu, (_, sp, p) => {
+      priority = p && p.toLowerCase() === "baixa" ? "low" : "high";
+      return sp;
+    })
+    .replace(/\s+/g, " ")
+    .trim();
+  return { title, tags, priority };
+}
+
+const store = {
+  get(key) {
+    try {
+      return localStorage.getItem(key);
+    } catch {
+      return store.mem[key] ?? null;
+    }
+  },
+  set(key, value) {
+    store.mem[key] = value;
+    try {
+      localStorage.setItem(key, value);
+    } catch {}
+  },
+  mem: {},
+};
+
 function versionOn(r, iso) {
   let chosen = r.versions[0];
   for (const v of r.versions) if (v.from <= iso) chosen = v;
@@ -185,7 +253,9 @@ async function load() {
     state.data = data;
     state.today = data.today;
     state.date = data.date;
+    state.loadedAt = performance.now();
     render();
+    tick();
   } catch (err) {
     toast(err.message, "error");
   }
@@ -196,8 +266,9 @@ async function act(fn, success) {
   try {
     const result = await fn();
     await load();
-    if (success) toast(typeof success === "function" ? success(result) : success);
-    return result;
+    const message = typeof success === "function" ? success(result) : success;
+    if (message) toast(message);
+    return result ?? true;
   } catch (err) {
     toast(err.message, "error");
     return undefined;
@@ -249,6 +320,7 @@ function renderSummary() {
   chips.push(
     `<span class="chip ${s.tasks_late ? "bad" : ""}"><b>${s.tasks_open}</b> ${s.tasks_open === 1 ? "tarefa aberta" : "tarefas abertas"}` +
       (s.tasks_late ? ` · ${plural(s.tasks_late, "atrasada", "atrasadas")}` : "") +
+      (s.tasks_high ? ` · ${s.tasks_high} de prioridade alta` : "") +
       "</span>"
   );
   if (s.tasks_done) chips.push(`<span class="chip ok"><b>${s.tasks_done}</b> ${s.tasks_done === 1 ? "concluída" : "concluídas"}</span>`);
@@ -316,10 +388,17 @@ function routineCard(r) {
   if (s.spent > EPS) breakdown.push(`<li class="credit">Coberto com saldo <b>${A(s.spent)}</b></li>`);
   if (s.forgiven > EPS) breakdown.push(`<li title="Passou do limite de acúmulo">Descartado pelo limite <b>${A(s.forgiven)}</b></li>`);
 
+  // Cronômetro: aparece no dia em que foi ligado (e sempre na tela de hoje).
+  const timer = r.timer && w !== "future" && (w === "today" || r.timer.date === state.date) ? r.timer : null;
+  const timerOnThisDay = timer && timer.date === state.date;
+
   const actions = [];
   if (w !== "future") {
     if (r.paused_now && w === "today") {
       actions.push(`<button class="btn small" data-action="resume">${ICONS.play} Retomar rotina</button>`);
+    }
+    if (r.unit === "time" && w === "today" && !r.timer) {
+      actions.push(`<button class="btn small timer-btn" data-action="timer-start" title="Conta o tempo enquanto você faz a atividade">${ICONS.timer} Cronômetro</button>`);
     }
     const quick = r.unit === "time" ? [15, 30, 60] : [1, 5];
     for (const q of quick) {
@@ -367,9 +446,12 @@ function routineCard(r) {
     </header>
     <div class="r-status"><strong>${esc(st.main)}</strong><span>${esc(st.sub)}</span></div>
     <div class="progress" role="progressbar" aria-valuenow="${Math.round(donePct + spentPct)}" aria-valuemin="0" aria-valuemax="100">
-      <div class="seg done" style="width:${donePct}%"></div><div class="seg spent" style="width:${spentPct}%"></div>
+      <div class="seg done" style="width:${donePct}%"></div><div class="seg spent" style="width:${spentPct}%"></div>${
+        timerOnThisDay ? `<div class="seg live" data-timer-bar="${r.id}" data-free="${Math.max(0, 100 - donePct - spentPct)}" data-required="${req}" style="width:0"></div>` : ""
+      }
     </div>
     <ul class="breakdown">${breakdown.join("")}</ul>
+    ${timer ? timerBlock(r, timer) : ""}
     ${r.notes ? `<p class="task-notes">${esc(r.notes)}</p>` : ""}
     ${actions.length ? `<div class="r-actions">${actions.join("")}</div>` : ""}
     <footer class="r-foot">
@@ -379,11 +461,32 @@ function routineCard(r) {
   </article>`;
 }
 
+function timerBlock(r, timer) {
+  const running = !!timer.running_since;
+  const startedOther = timer.date !== state.today ? ` · iniciado ${dayName(timer.date).toLowerCase()} (${shortDate(timer.date)})` : "";
+  return `<div class="timer ${running ? "running" : "paused"}" data-timer="${r.id}">
+    <div class="timer-clock"><span class="timer-dot" aria-hidden="true"></span><b data-timer-clock>--:--:--</b></div>
+    <div class="timer-info"><span data-timer-info></span><small>${running ? "Cronômetro rodando" : "Cronômetro pausado"}${esc(startedOther)}</small></div>
+    <div class="timer-actions">
+      ${
+        running
+          ? `<button class="btn small" data-action="timer-pause">${ICONS.pause} Pausar</button>`
+          : `<button class="btn small" data-action="timer-resume">${ICONS.play} Continuar</button>`
+      }
+      <button class="btn small ok" data-action="timer-stop" title="Para o cronômetro e registra o tempo">${ICONS.stop} Parar e registrar</button>
+      <button class="icon-btn sm" data-action="timer-cancel" title="Descartar (não registra nada)" aria-label="Descartar cronômetro">${ICONS.trash}</button>
+    </div>
+  </div>`;
+}
+
 function renderTasks() {
   const list = $("#task-list");
-  const tasks = state.data.tasks;
+  const all = state.data.tasks;
+  renderTagFilter(all);
+  const key = state.filterTag?.toLowerCase();
+  const tasks = key ? all.filter((t) => t.tags.some((tag) => tag.toLowerCase() === key)) : all;
   if (!tasks.length) {
-    const msg = when() === "past" ? "Nenhuma tarefa neste dia." : "Nada pendente por aqui. 🎉";
+    const msg = key ? `Nenhuma tarefa com #${esc(state.filterTag)} neste dia.` : when() === "past" ? "Nenhuma tarefa neste dia." : "Nada pendente por aqui. 🎉";
     list.innerHTML = `<li class="empty"><strong>${msg}</strong>Adicione uma tarefa acima — se não der tempo, ela passa sozinha para o dia seguinte.</li>`;
     return;
   }
@@ -396,26 +499,82 @@ function renderTasks() {
   list.innerHTML = html;
 }
 
+function renderTagFilter(tasks) {
+  const bar = $("#tag-filter");
+  const tags = new Map();
+  for (const t of tasks) for (const tag of t.tags) tags.set(tag.toLowerCase(), tag);
+  if (state.filterTag) tags.set(state.filterTag.toLowerCase(), state.filterTag);
+  if (!tags.size) {
+    bar.hidden = true;
+    return;
+  }
+  const active = state.filterTag?.toLowerCase();
+  const chips = [...tags.values()].sort((a, b) => a.localeCompare(b, "pt-BR"));
+  bar.hidden = false;
+  bar.innerHTML =
+    `<button class="tag-chip ${active ? "" : "active"}" data-tag="">Todas</button>` +
+    chips.map((tag) => `<button class="tag-chip ${tag.toLowerCase() === active ? "active" : ""}" data-tag="${esc(tag)}">#${esc(tag)}</button>`).join("");
+}
+
 function taskItem(t) {
   const tags = [];
   const late = t.days_late;
+  const open = t.status !== "done";
+  if (t.priority === "high") tags.push(`<span class="badge prio-high">${ICONS.flag} Prioridade alta</span>`);
+  if (t.priority === "low") tags.push('<span class="badge prio-low">Prioridade baixa</span>');
   if (t.status === "rolled") {
     tags.push('<span class="badge warn">Não concluída — passou para o dia seguinte</span>');
   }
-  if (late > 0 && t.status !== "done") {
-    tags.push(`<span class="badge late" title="Data original: ${shortDate(t.date)}">Adiada há ${plural(late, "dia", "dias")} · desde ${shortDate(t.date)}</span>`);
+  if (t.status === "missed") {
+    tags.push('<span class="badge warn" title="Tarefas recorrentes não acumulam">Não feita — substituída pela próxima repetição</span>');
+  }
+  if (late > 0 && open) {
+    const what = t.repeat ? "Atrasada" : "Adiada";
+    tags.push(`<span class="badge late" title="Data original: ${shortDate(t.due)}">${what} há ${plural(late, "dia", "dias")} · desde ${shortDate(t.due)}</span>`);
   } else if (late > 0) {
     tags.push(`<span class="badge">Concluída com ${plural(late, "dia", "dias")} de atraso</span>`);
   }
-  const doneTitle = t.status === "done" ? "Desmarcar" : "Marcar como concluída";
-  return `<li class="task st-${t.status}" data-id="${t.id}">
-    <button class="check" data-action="toggle-task" title="${doneTitle}" aria-label="${doneTitle}">${ICONS.check}</button>
+  if (t.repeat) {
+    const next = t.next_occurrence ? ` · próxima: ${fmtShortWeekday.format(parseISO(t.next_occurrence))}` : "";
+    tags.push(`<span class="badge repeat" title="Tarefa recorrente: não acumula${esc(next)}">${ICONS.repeat} ${esc(repeatText(t.repeat))}</span>`);
+  }
+  const subs = t.subtasks;
+  const subsDone = subs.filter((s) => s.done).length;
+  if (subs.length) {
+    tags.push(`<span class="badge ${subsDone === subs.length ? "ok" : ""}" title="Subtarefas concluídas">${ICONS.sublist} ${subsDone}/${subs.length}</span>`);
+  }
+  for (const tag of t.tags) {
+    tags.push(`<button class="tag-chip small" data-action="filter-tag" data-tag="${esc(tag)}" title="Filtrar por #${esc(tag)}">#${esc(tag)}</button>`);
+  }
+
+  const lockTitle = "Essa repetição ainda não chegou";
+  const locked = !t.can_complete && open;
+  const doneTitle = locked ? lockTitle : open ? "Marcar como concluída" : "Desmarcar";
+  const subItems = subs
+    .map(
+      (s) => `<li class="sub ${s.done ? "done" : ""}">
+        <button class="check sm" data-action="toggle-sub" data-sub="${s.id}" ${locked ? `disabled title="${lockTitle}"` : `title="${s.done ? "Desmarcar" : "Marcar"}"`} aria-label="${s.done ? "Desmarcar" : "Marcar"} subtarefa">${ICONS.check}</button>
+        <span>${esc(s.title)}</span>
+        <button class="icon-btn xs" data-action="del-sub" data-sub="${s.id}" title="Excluir subtarefa" aria-label="Excluir subtarefa">${ICONS.x}</button>
+      </li>`
+    )
+    .join("");
+  const showAdd = state.addingSubFor === t.id || (subs.length > 0 && open);
+  const addForm = showAdd
+    ? `<li><form class="sub-add" data-sub-form><input name="title" maxlength="200" placeholder="+ Adicionar subtarefa (Enter)" aria-label="Nova subtarefa"></form></li>`
+    : "";
+
+  const classes = ["task", `st-${t.status}`, `prio-${t.priority}`];
+  return `<li class="${classes.join(" ")}" data-id="${t.id}">
+    <button class="check" data-action="toggle-task" title="${doneTitle}" aria-label="${doneTitle}" ${locked ? "disabled" : ""}>${ICONS.check}</button>
     <div class="task-body">
       <div class="task-title">${esc(t.title)}</div>
       <div class="task-tags">${tags.join("")}</div>
       ${t.notes ? `<p class="task-notes">${esc(t.notes)}</p>` : ""}
+      ${subItems || addForm ? `<ul class="subtasks">${subItems}${addForm}</ul>` : ""}
     </div>
     <div class="task-actions">
+      <button class="icon-btn sm" data-action="add-sub" title="Adicionar subtarefa" aria-label="Adicionar subtarefa">${ICONS.sublist}</button>
       <button class="icon-btn sm" data-action="edit-task" title="Editar" aria-label="Editar">${ICONS.edit}</button>
       <button class="icon-btn sm" data-action="delete-task" title="Excluir" aria-label="Excluir">${ICONS.trash}</button>
     </div>
@@ -430,7 +589,11 @@ const modal = { el: $("#modal"), form: $("#modal-form"), onSubmit: null, onClose
 
 function openModal({ title, body, submitLabel = "Salvar", danger = false, wide = false, hideSubmit = false, cancelLabel = "Cancelar", onSubmit, onOpen, onClose }) {
   $("#modal-title").textContent = title;
-  $("#modal-body").innerHTML = body;
+  // Troca o elemento do corpo para descartar os event listeners do modal anterior.
+  const oldBody = $("#modal-body");
+  const freshBody = oldBody.cloneNode(false);
+  oldBody.replaceWith(freshBody);
+  freshBody.innerHTML = body;
   const submit = $("#modal-submit");
   submit.textContent = submitLabel;
   submit.className = `btn ${danger ? "danger" : "primary"}`;
@@ -550,17 +713,52 @@ function toast(message, kind = "") {
 // Tarefas
 // ---------------------------------------------------------------------------
 
+function readTaskForm() {
+  const quick = parseQuickTask($("#task-title").value);
+  const chosen = $("#task-priority").value;
+  return {
+    title: quick.title,
+    tags: quick.tags,
+    priority: chosen !== "normal" ? chosen : quick.priority || "normal",
+    date: $("#task-date").value || state.today,
+  };
+}
+
+function resetTaskForm() {
+  $("#task-title").value = "";
+  $("#task-priority").value = "normal";
+  $("#task-title").focus();
+}
+
 $("#task-form").addEventListener("submit", async (ev) => {
   ev.preventDefault();
-  const input = $("#task-title");
+  const body = readTaskForm();
+  if (!body.title) return toast("Escreva o título da tarefa (além das #etiquetas).", "error");
+  const date = body.date;
+  const ok = await act(() => api("POST", "/api/tasks", body), date === state.date ? "Tarefa adicionada" : `Tarefa adicionada para ${dayName(date).toLowerCase()} (${shortDate(date)})`);
+  if (ok) resetTaskForm();
+});
+
+$("#task-more").addEventListener("click", () => openTaskModal(null, readTaskForm()));
+
+$("#tag-filter").addEventListener("click", (ev) => {
+  const chip = ev.target.closest("[data-tag]");
+  if (!chip) return;
+  state.filterTag = chip.dataset.tag || null;
+  renderTasks();
+});
+
+$("#task-list").addEventListener("submit", async (ev) => {
+  const form = ev.target.closest("[data-sub-form]");
+  if (!form) return;
+  ev.preventDefault();
+  const id = form.closest("[data-id]").dataset.id;
+  const input = form.elements.title;
   const title = input.value.trim();
   if (!title) return;
-  const date = $("#task-date").value || state.today;
-  const ok = await act(() => api("POST", "/api/tasks", { title, date }), date === state.date ? "Tarefa adicionada" : `Tarefa adicionada para ${dayName(date).toLowerCase()} (${shortDate(date)})`);
-  if (ok) {
-    input.value = "";
-    input.focus();
-  }
+  state.addingSubFor = id;
+  const ok = await act(() => api("POST", `/api/tasks/${id}/subtasks`, { title }));
+  if (ok) $(`#task-list [data-id="${id}"] [data-sub-form] input`)?.focus();
 });
 
 $("#task-list").addEventListener("click", async (ev) => {
@@ -573,38 +771,186 @@ $("#task-list").addEventListener("click", async (ev) => {
   switch (btn.dataset.action) {
     case "toggle-task":
       if (task.status === "done") {
-        await act(() => api("POST", `/api/tasks/${id}/reopen`), "Tarefa reaberta");
+        await act(() => api("POST", `/api/tasks/${id}/reopen`, { date: state.date }), "Tarefa reaberta");
       } else {
-        const msg = when() === "future" ? "Concluída hoje, antes do prazo!" : "Tarefa concluída ✓";
+        const msg = when() === "future" ? "Concluída hoje, antes do prazo!" : task.repeat ? "Feito! Até a próxima repetição ✓" : "Tarefa concluída ✓";
         await act(() => api("POST", `/api/tasks/${id}/complete`, { date: state.date }), msg);
       }
+      break;
+    case "toggle-sub":
+      await act(
+        () => api("POST", `/api/tasks/${id}/subtasks/${btn.dataset.sub}/toggle`, { date: state.date }),
+        (res) => (res.task_change === "completed" ? "Todas as subtarefas feitas — tarefa concluída ✓" : res.task_change === "reopened" ? "Subtarefa desmarcada — a tarefa foi reaberta" : null)
+      );
+      break;
+    case "del-sub":
+      await act(() => api("DELETE", `/api/tasks/${id}/subtasks/${btn.dataset.sub}`), "Subtarefa excluída");
+      break;
+    case "add-sub":
+      state.addingSubFor = id;
+      renderTasks();
+      $(`#task-list [data-id="${id}"] [data-sub-form] input`)?.focus();
+      break;
+    case "filter-tag":
+      state.filterTag = btn.dataset.tag;
+      renderTasks();
       break;
     case "edit-task":
       openTaskModal(task);
       break;
     case "delete-task":
-      if (await confirmDialog("Excluir tarefa", `Excluir <b>${esc(task.title)}</b>? Isso não pode ser desfeito.`)) {
+      if (await confirmDialog("Excluir tarefa", `Excluir <b>${esc(task.title)}</b>${task.repeat ? " e todas as suas repetições" : ""}? Isso não pode ser desfeito.`)) {
         await act(() => api("DELETE", `/api/tasks/${id}`), "Tarefa excluída");
       }
       break;
   }
 });
 
-function openTaskModal(task) {
-  const done = task.status === "done";
+function subtaskRow(sub = { id: "", title: "" }) {
+  return `<div class="sub-row" data-sub-id="${esc(sub.id)}">
+    <input name="subtask" maxlength="200" value="${esc(sub.title)}" placeholder="Ex.: pesquisar referências" aria-label="Subtarefa">
+    <button type="button" class="icon-btn sm" data-remove-sub title="Remover" aria-label="Remover subtarefa">${ICONS.x}</button>
+  </div>`;
+}
+
+/** Cria (task = null) ou edita uma tarefa. ``preset`` vem do formulário rápido. */
+function openTaskModal(task, preset = {}) {
+  const editing = !!task;
+  const t = task || {
+    title: preset.title || "",
+    notes: "",
+    date: preset.date || state.today,
+    priority: preset.priority || "normal",
+    tags: preset.tags || [],
+    subtasks: [],
+    repeat: null,
+  };
+  const lockedDate = editing && !t.repeat && t.status === "done";
+  const rep = t.repeat || {};
+  const repType = rep.type || "none";
+  const startDay = parseISO(t.date);
+  const weekdays = rep.weekdays || [(startDay.getDay() + 6) % 7];
+  const otherTags = (state.data.tags || []).filter((tag) => !t.tags.some((x) => x.toLowerCase() === tag.toLowerCase()));
+
+  const radio = (name, value, label, current) => `<label><input type="radio" name="${name}" value="${value}" ${current === value ? "checked" : ""}>${label}</label>`;
+  const weekdayChips = WEEKDAYS.map((name, i) => `<label><input type="checkbox" name="rep_weekdays" value="${i}" ${weekdays.includes(i) ? "checked" : ""}>${name}</label>`).join("");
+
   openModal({
-    title: "Editar tarefa",
+    title: editing ? "Editar tarefa" : "Nova tarefa",
     body: `
-      <label class="field"><span>Título</span><input name="title" maxlength="200" value="${esc(task.title)}" required></label>
-      <label class="field"><span>Data</span><input type="date" name="date" value="${task.date}" ${done ? "disabled" : ""}>
-        <small>${done ? "Desmarque a tarefa para mudar a data." : "Mudar a data é uma forma de adiar manualmente. Se ficar pendente, ela continua passando para o dia seguinte."}</small></label>
-      <label class="field"><span>Anotações</span><textarea name="notes" maxlength="2000" placeholder="Opcional">${esc(task.notes)}</textarea></label>`,
-    onSubmit: async (fd) => {
-      const body = { title: fd.get("title"), notes: fd.get("notes") };
-      if (!done) body.date = fd.get("date");
-      await api("PATCH", `/api/tasks/${task.id}`, body);
+      <label class="field"><span>Título</span><input name="title" maxlength="200" value="${esc(t.title)}" placeholder="ex.: Entregar trabalho de banco de dados" required></label>
+
+      <div class="row">
+        <label class="field"><span data-date-label>${t.repeat ? "Começa em" : "Data"}</span><input type="date" name="date" value="${t.date}" ${lockedDate ? "disabled" : ""}>
+          ${lockedDate ? "<small>Desmarque a tarefa para mudar a data.</small>" : ""}</label>
+        <div class="field"><span>Prioridade</span>
+          <div class="segmented">${radio("priority", "high", "Alta", t.priority)}${radio("priority", "normal", "Normal", t.priority)}${radio("priority", "low", "Baixa", t.priority)}</div>
+        </div>
+      </div>
+
+      <div class="field"><span>Etiquetas</span>
+        <input name="tags" value="${esc(t.tags.join(", "))}" placeholder="ex.: faculdade, casa (separadas por vírgula)">
+        ${otherTags.length ? `<div class="quick">${otherTags.map((tag) => `<button type="button" class="tag-chip small" data-add-tag="${esc(tag)}">#${esc(tag)}</button>`).join("")}</div>` : ""}
+      </div>
+
+      <div class="field"><span>Repetir</span>
+        <div class="segmented">${radio("rep_type", "none", "Não repete", repType)}${radio("rep_type", "weekly", "Semanal", repType)}${radio("rep_type", "monthly", "Mensal", repType)}${radio("rep_type", "interval", "A cada N dias", repType)}</div>
+        <div data-rep="weekly" class="rep-box">
+          <div class="weekdays">${weekdayChips}</div>
+          <div class="weekday-presets">
+            <button type="button" class="btn small ghost" data-preset="0,1,2,3,4,5,6">Todo dia</button>
+            <button type="button" class="btn small ghost" data-preset="0,1,2,3,4">Seg a sex</button>
+            <button type="button" class="btn small ghost" data-preset="5,6">Fim de semana</button>
+          </div>
+        </div>
+        <label data-rep="monthly" class="rep-box inline">Todo dia <input type="number" name="rep_day" min="1" max="31" value="${rep.day || startDay.getDate()}"> do mês
+          <small>(em meses mais curtos, vale o último dia)</small></label>
+        <label data-rep="interval" class="rep-box inline">A cada <input type="number" name="rep_every" min="1" max="365" value="${rep.every || 2}"> dias, contando da data de início</label>
+        <label data-rep-until class="rep-box inline">Até <input type="date" name="rep_until" value="${rep.until || ""}"> <small>(opcional)</small></label>
+        <small data-rep-hint>Tarefas recorrentes não acumulam: se uma repetição não for feita, ela continua aparecendo só até a próxima chegar.</small>
+      </div>
+
+      <div class="field"><span>Subtarefas</span>
+        <div class="sub-editor">${t.subtasks.map(subtaskRow).join("")}</div>
+        <button type="button" class="btn small ghost" data-add-sub style="justify-self:start">${ICONS.plus} Adicionar subtarefa</button>
+        <small>Quando todas forem marcadas, a tarefa é concluída sozinha.${t.repeat ? " Em tarefas recorrentes, elas são desmarcadas a cada nova repetição." : ""}</small>
+      </div>
+
+      <label class="field"><span>Anotações</span><textarea name="notes" maxlength="2000" placeholder="Opcional">${esc(t.notes)}</textarea></label>`,
+    submitLabel: editing ? "Salvar" : "Criar tarefa",
+    onOpen: (body) => {
+      const sync = () => {
+        const type = body.querySelector('[name="rep_type"]:checked').value;
+        body.querySelectorAll("[data-rep]").forEach((el) => (el.hidden = el.dataset.rep !== type));
+        body.querySelector("[data-rep-until]").hidden = type === "none";
+        body.querySelector("[data-rep-hint]").hidden = type === "none";
+        body.querySelector("[data-date-label]").textContent = type === "none" ? "Data" : "Começa em";
+      };
+      const addRow = () => {
+        body.querySelector(".sub-editor").insertAdjacentHTML("beforeend", subtaskRow());
+        body.querySelector(".sub-editor .sub-row:last-child input").focus();
+      };
+      body.addEventListener("change", (ev) => ev.target.name === "rep_type" && sync());
+      body.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter" && ev.target.name === "subtask") {
+          ev.preventDefault();
+          addRow();
+        }
+      });
+      body.addEventListener("click", (ev) => {
+        const preset = ev.target.closest("[data-preset]");
+        if (preset) {
+          const days = preset.dataset.preset.split(",");
+          body.querySelectorAll('[name="rep_weekdays"]').forEach((cb) => (cb.checked = days.includes(cb.value)));
+        }
+        if (ev.target.closest("[data-add-sub]")) addRow();
+        const remove = ev.target.closest("[data-remove-sub]");
+        if (remove) remove.closest(".sub-row").remove();
+        const addTag = ev.target.closest("[data-add-tag]");
+        if (addTag) {
+          const input = body.querySelector('[name="tags"]');
+          const current = input.value.split(",").map((s) => s.trim()).filter(Boolean);
+          current.push(addTag.dataset.addTag);
+          input.value = current.join(", ");
+          addTag.remove();
+        }
+      });
+      sync();
+    },
+    onSubmit: async (fd, form) => {
+      const type = fd.get("rep_type");
+      let repeat = null;
+      if (type === "weekly") {
+        const days = fd.getAll("rep_weekdays").map(Number);
+        if (!days.length) throw new Error("Escolha pelo menos um dia da semana para repetir.");
+        repeat = { type, weekdays: days };
+      } else if (type === "monthly") {
+        repeat = { type, day: Number(fd.get("rep_day")) };
+      } else if (type === "interval") {
+        repeat = { type, every: Number(fd.get("rep_every")) };
+      }
+      if (repeat) repeat.until = fd.get("rep_until") || null;
+
+      const subtasks = [...form.querySelectorAll(".sub-row")]
+        .map((row) => ({ id: row.dataset.subId || undefined, title: row.querySelector("input").value.trim() }))
+        .filter((s) => s.title);
+      const body = {
+        title: fd.get("title"),
+        notes: fd.get("notes"),
+        priority: fd.get("priority"),
+        tags: String(fd.get("tags") || "").split(","),
+        repeat,
+        subtasks,
+      };
+      if (!lockedDate) body.date = fd.get("date") || state.today;
+      if (editing) {
+        await api("PATCH", `/api/tasks/${task.id}`, body);
+      } else {
+        await api("POST", "/api/tasks", body);
+        resetTaskForm();
+      }
       await load();
-      toast("Tarefa atualizada");
+      toast(editing ? "Tarefa atualizada" : repeat ? "Tarefa recorrente criada" : "Tarefa criada");
     },
   });
 }
@@ -645,8 +991,257 @@ $("#routine-list").addEventListener("click", async (ev) => {
     case "routine-menu":
       openRoutineMenu(btn, r);
       break;
+    case "timer-start":
+      primeAudio();
+      if (state.data.settings.notify_timer) await ensureNotifyPermission();
+      await act(() => api("POST", `/api/routines/${id}/timer/start`), "Cronômetro ligado — bom trabalho!");
+      break;
+    case "timer-pause":
+      await act(() => api("POST", `/api/routines/${id}/timer/pause`), "Cronômetro pausado");
+      break;
+    case "timer-resume":
+      primeAudio();
+      await act(() => api("POST", `/api/routines/${id}/timer/start`), "Cronômetro retomado");
+      break;
+    case "timer-stop":
+      openTimerStopModal(id);
+      break;
+    case "timer-cancel":
+      if (await confirmDialog("Descartar cronômetro", `Descartar o cronômetro de <b>${esc(r.title)}</b>? O tempo contado <b>não</b> será registrado.`, "Descartar")) {
+        await act(() => api("POST", `/api/routines/${id}/timer/cancel`), "Cronômetro descartado");
+      }
+      break;
   }
 });
+
+// ---------------------------------------------------------------------------
+// Cronômetro e avisos
+// ---------------------------------------------------------------------------
+
+function activeTimer(routineId) {
+  return state.data?.timers.find((t) => t.routine_id === routineId) || null;
+}
+
+/** Segundos contados agora (a base vem do servidor; o resto, do relógio local). */
+function timerSeconds(t) {
+  return t.elapsed_now + (t.running_since ? (performance.now() - state.loadedAt) / 1000 : 0);
+}
+
+function timerInfoText(t, minutes) {
+  if (t.remaining <= EPS) return `A meta já estava cumprida — tudo vira saldo (+${fmtMinutes(minutes)})`;
+  const left = t.remaining - minutes;
+  if (left > EPS) return `Faltam ${fmtMinutes(Math.ceil(left))} para cumprir a meta de ${fmtMinutes(t.required)}`;
+  const extra = -left;
+  return extra >= 1 ? `Meta cumprida! +${fmtMinutes(Math.floor(extra))} vai para o saldo` : "Meta cumprida agora!";
+}
+
+/** Atualiza relógios, barra, título da janela e dispara o aviso de meta. Roda a cada segundo. */
+function tick() {
+  const timers = state.data?.timers || [];
+  for (const t of timers) {
+    const seconds = timerSeconds(t);
+    const minutes = seconds / 60;
+    const box = document.querySelector(`[data-timer="${t.routine_id}"]`);
+    if (box) {
+      box.querySelector("[data-timer-clock]").textContent = fmtClock(seconds);
+      box.querySelector("[data-timer-info]").textContent = timerInfoText(t, minutes);
+      box.classList.toggle("goal", t.remaining > EPS && minutes >= t.remaining);
+    }
+    const bar = document.querySelector(`[data-timer-bar="${t.routine_id}"]`);
+    if (bar) {
+      const req = +bar.dataset.required;
+      bar.style.width = `${req > EPS ? Math.min(+bar.dataset.free, (minutes / req) * 100) : 0}%`;
+    }
+    if (t.running_since && t.remaining > EPS && minutes >= t.remaining) timerGoalReached(t);
+  }
+
+  const pill = $("#timer-pill");
+  const main = timers.find((t) => t.running_since) || timers[0];
+  if (main) {
+    const clock = fmtClock(timerSeconds(main));
+    pill.hidden = false;
+    pill.classList.toggle("paused", !main.running_since);
+    pill.innerHTML = `${ICONS.timer}<b>${clock}</b><span>${esc(main.title)}${timers.length > 1 ? ` +${timers.length - 1}` : ""}</span>`;
+    document.title = `${main.running_since ? "⏱" : "⏸"} ${clock} · ${main.title}`;
+  } else {
+    pill.hidden = true;
+    if (state.date) document.title = state.date === state.today ? "Auto Reschedule" : `${dayName(state.date)} · Auto Reschedule`;
+  }
+}
+
+$("#timer-pill").addEventListener("click", async () => {
+  const main = (state.data?.timers || [])[0];
+  if (!main) return;
+  if (state.view) {
+    state.view = null;
+    await load();
+  }
+  document.querySelector(`[data-timer="${main.routine_id}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+});
+
+function timerGoalReached(t) {
+  const key = `ar-goal-${t.id}`;
+  if (store.get(key)) return;
+  store.set(key, "1");
+  const settings = state.data.settings;
+  if (!settings.notify_timer) return;
+
+  const body = "Pare o cronômetro para registrar o tempo certo — ou deixe rodando: o que passar da meta vira saldo.";
+  notify(`⏰ Meta cumprida: ${t.title}`, body, { tag: key, sticky: true });
+  if (modal.el.open) {
+    toast(`⏰ Meta de "${t.title}" cumprida! Pare o cronômetro ou continue para ganhar saldo.`);
+    return;
+  }
+  openModal({
+    title: "⏰ Meta de hoje cumprida!",
+    body: `<p style="margin:0">Você completou o que faltava de <b>${esc(t.title)}</b> (${fmtMinutes(t.remaining)}).</p>
+      <p class="note">Se já terminou a atividade, <b>pare o cronômetro</b> para registrar o tempo correto.
+      Se quiser continuar, tudo bem: o cronômetro segue contando e o que passar da meta vira <b>saldo</b> para usar outro dia.</p>`,
+    submitLabel: "Parar e registrar",
+    cancelLabel: "Continuar contando",
+    onSubmit: () => {
+      closeModal();
+      openTimerStopModal(t.routine_id);
+      return false;
+    },
+  });
+}
+
+function openTimerStopModal(routineId) {
+  const t = activeTimer(routineId);
+  if (!t) return;
+  const seconds = timerSeconds(t);
+  const counted = Math.round(seconds / 60);
+  const r = { unit: "time" };
+  const otherDay = t.date !== state.today ? `<p class="note">O cronômetro foi ligado em <b>${esc(dayName(t.date).toLowerCase())} (${shortDate(t.date)})</b> — o tempo será registrado nesse dia.</p>` : "";
+  openModal({
+    title: `Parar cronômetro — ${t.title}`,
+    body: `
+      <p style="margin:0">Tempo contado: <b>${fmtClock(seconds)}</b>.</p>
+      <label class="field"><span>Quanto registrar?</span>${amountInput(r, "amount", counted > 0 ? fmtMinutes(counted) : "", "")}
+        <small>Se o cronômetro ficou ligado depois que você terminou (ou se esqueceu de ligar), corrija aqui.</small></label>
+      ${quickFill(r, [...new Set([counted, Math.ceil(t.remaining)].filter((v) => v > 0))].sort((a, b) => a - b))}
+      <p class="note" data-preview></p>
+      ${otherDay}`,
+    submitLabel: "Registrar e parar",
+    onOpen: (body) => {
+      bindQuickFill(body, "amount");
+      const preview = () => {
+        const v = parseDuration(body.querySelector('[name="amount"]').value);
+        const el = body.querySelector("[data-preview]");
+        if (!v) {
+          el.textContent = "Informe um tempo (ex.: 45min, 1h ou 1h30).";
+        } else if (t.remaining <= EPS) {
+          el.textContent = `A meta já estava cumprida: os ${fmtMinutes(v)} vão todos para o saldo.`;
+        } else if (v < t.remaining) {
+          el.textContent = `Ainda vão faltar ${fmtMinutes(t.remaining - v)} (que acumulam para amanhã se não forem feitos).`;
+        } else {
+          el.textContent = v - t.remaining >= 1 ? `Meta cumprida e +${fmtMinutes(v - t.remaining)} vão para o saldo.` : "Exatamente a meta. 🎯";
+        }
+      };
+      body.addEventListener("input", preview);
+      body.addEventListener("click", () => setTimeout(preview));
+      preview();
+    },
+    onSubmit: async (fd) => {
+      const amount = parseDuration(fd.get("amount"));
+      if (!amount || amount <= 0) throw new Error("Informe um tempo válido, ex.: 45min, 1h ou 1h30 (ou use a lixeira para descartar).");
+      const res = await api("POST", `/api/routines/${routineId}/timer/stop`, { amount });
+      await load();
+      toast(res.entry ? `Registrado +${fmtMinutes(res.entry.amount)} pelo cronômetro` : "Cronômetro parado");
+    },
+  });
+}
+
+let audioCtx = null;
+
+/** O navegador só libera som depois de um clique; chamamos isto nos cliques do cronômetro. */
+function primeAudio() {
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === "suspended") audioCtx.resume();
+  } catch {}
+}
+
+function beep() {
+  if (!state.data?.settings.sound) return;
+  try {
+    primeAudio();
+    const start = audioCtx.currentTime;
+    [0, 0.18, 0.36].forEach((offset, i) => {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = i === 2 ? 1046 : 784;
+      gain.gain.setValueAtTime(0.0001, start + offset);
+      gain.gain.exponentialRampToValueAtTime(0.25, start + offset + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + offset + 0.16);
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start(start + offset);
+      osc.stop(start + offset + 0.18);
+    });
+  } catch {}
+}
+
+function notifySupport() {
+  if (!("Notification" in window)) return "unsupported";
+  return Notification.permission; // "granted" | "denied" | "default"
+}
+
+async function ensureNotifyPermission() {
+  if (notifySupport() !== "default") return notifySupport();
+  try {
+    return await Notification.requestPermission();
+  } catch {
+    return notifySupport();
+  }
+}
+
+/** Notificação na área de trabalho (se permitido) + som. */
+function notify(title, body, { tag, sticky = false } = {}) {
+  beep();
+  if (notifySupport() !== "granted") return false;
+  try {
+    const n = new Notification(title, { body, tag, icon: "icon-192.png", requireInteraction: sticky });
+    n.onclick = () => {
+      window.focus();
+      n.close();
+    };
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Lembrete do fim do dia: uma vez por dia, depois do horário configurado. */
+async function checkEndOfDay() {
+  const settings = state.data?.settings;
+  if (!settings?.notify_end_of_day) return;
+  const now = new Date();
+  const [hh, mm] = settings.notify_time.split(":").map(Number);
+  if (now.getHours() * 60 + now.getMinutes() < hh * 60 + mm) return;
+  const today = toISO(now);
+  if (store.get("ar-eod") === today) return;
+  store.set("ar-eod", today);
+
+  let data = state.data;
+  if (state.view) {
+    try {
+      data = await api("GET", "/api/state");
+    } catch {
+      return;
+    }
+  }
+  const tasks = data.tasks.filter((t) => t.status !== "done");
+  const routines = data.routines.filter((r) => r.day.remaining > EPS);
+  if (!tasks.length && !routines.length) return;
+
+  const lines = routines.slice(0, 3).map((r) => `• ${r.title}: falta ${fmtAmount(r, r.day.remaining)}`);
+  if (tasks.length) lines.push(`• ${plural(tasks.length, "tarefa aberta", "tarefas abertas")}${tasks.length <= 2 ? `: ${tasks.map((t) => t.title).join(", ")}` : ""}`);
+  const body = `${lines.join("\n")}\nO que não for feito passa para amanhã.`;
+  notify("🌙 Fim do dia — ainda falta:", body, { tag: "ar-eod" });
+  toast(`Fim do dia: ${[routines.length && plural(routines.length, "rotina pendente", "rotinas pendentes"), tasks.length && plural(tasks.length, "tarefa aberta", "tarefas abertas")].filter(Boolean).join(" e ")}.`);
+}
 
 async function logProgress(r, amount) {
   const before = r.day;
@@ -980,6 +1575,7 @@ $("#app-menu-btn").addEventListener("click", (ev) => {
         a.click();
       },
     },
+    { label: "Configurações e avisos", icon: ICONS.gear, run: openSettingsModal },
     { label: "Como funciona", icon: ICONS.info, run: openHelp },
     "-",
     {
@@ -998,6 +1594,63 @@ $("#app-menu-btn").addEventListener("click", (ev) => {
   ]);
 });
 
+function openSettingsModal() {
+  const s = state.data.settings;
+  const permText = {
+    granted: "✅ Notificações permitidas.",
+    denied: "🚫 Notificações bloqueadas. Libere em: ícone de cadeado/site na barra do navegador → Notificações → Permitir. Enquanto isso, os avisos aparecem só dentro do app.",
+    default: "Ainda não permitido — clique em “Permitir notificações”.",
+    unsupported: "Este navegador não suporta notificações; os avisos aparecem só dentro do app.",
+  };
+  openModal({
+    title: "Configurações e avisos",
+    body: `
+      <label class="checkline"><input type="checkbox" name="notify_end_of_day" ${s.notify_end_of_day ? "checked" : ""}>
+        <span>Lembrete no fim do dia<small>Se ainda houver tarefas ou rotinas pendentes, avisa uma vez por dia neste horário.</small></span></label>
+      <label class="field" style="margin-left:26px"><span>Horário do lembrete</span><input type="time" name="notify_time" value="${esc(s.notify_time)}" style="max-width:140px"></label>
+      <label class="checkline"><input type="checkbox" name="notify_timer" ${s.notify_timer ? "checked" : ""}>
+        <span>Avisar quando o cronômetro atingir a meta<small>Lembra você de parar o cronômetro — ou de continuar para ganhar saldo.</small></span></label>
+      <label class="checkline"><input type="checkbox" name="sound" ${s.sound ? "checked" : ""}>
+        <span>Tocar um som nos avisos</span></label>
+      <div class="note">
+        <p style="margin:0 0 8px" data-perm>${permText[notifySupport()]}</p>
+        <div class="quick">
+          <button type="button" class="btn small" data-perm-ask>Permitir notificações</button>
+          <button type="button" class="btn small ghost" data-test>Testar aviso</button>
+        </div>
+        <p style="margin:8px 0 0">Os avisos funcionam enquanto a janela do app estiver aberta (pode ficar minimizada).</p>
+      </div>`,
+    onOpen: (body) => {
+      body.addEventListener("click", async (ev) => {
+        if (ev.target.closest("[data-perm-ask]")) {
+          await ensureNotifyPermission();
+          body.querySelector("[data-perm]").textContent = permText[notifySupport()];
+        }
+        if (ev.target.closest("[data-test]")) {
+          primeAudio();
+          const shown = notify("Auto Reschedule", "Assim aparecem os avisos. 👋", { tag: "ar-test" });
+          if (!shown) toast("Aviso de teste (as notificações da área de trabalho não estão permitidas).");
+        }
+      });
+    },
+    onSubmit: async (fd) => {
+      const time = fd.get("notify_time");
+      if (!/^\d{2}:\d{2}$/.test(time || "")) throw new Error("Informe o horário do lembrete (HH:MM).");
+      const settings = {
+        notify_end_of_day: fd.get("notify_end_of_day") === "on",
+        notify_time: time,
+        notify_timer: fd.get("notify_timer") === "on",
+        sound: fd.get("sound") === "on",
+      };
+      if ((settings.notify_end_of_day || settings.notify_timer) && notifySupport() === "default") await ensureNotifyPermission();
+      if (settings.notify_time !== s.notify_time) store.set("ar-eod", ""); // novo horário vale ainda hoje
+      await api("PATCH", "/api/settings", settings);
+      await load();
+      toast("Configurações salvas");
+    },
+  });
+}
+
 function openHelp() {
   openModal({
     title: "Como funciona",
@@ -1005,11 +1658,17 @@ function openHelp() {
     cancelLabel: "Entendi",
     body: `
       <p style="margin:0"><b>Tarefas</b> têm uma data. Se o dia passar e ela não for marcada, ela aparece no dia seguinte com a etiqueta <i>"Adiada há N dias"</i> — e continua assim até você concluir.</p>
+      <ul style="margin:0;padding-left:20px;display:grid;gap:4px">
+        <li>Digite <b>#etiqueta</b> e <b>!alta</b> / <b>!baixa</b> no título para já criar com etiqueta e prioridade.</li>
+        <li>Tarefa grande? Quebre em <b>subtarefas</b> (ícone de lista). Marcou todas, a tarefa é concluída.</li>
+        <li><b>Recorrentes</b> (semanal, mensal ou a cada N dias) não acumulam: a repetição não feita some quando a próxima chega.</li>
+      </ul>
       <p style="margin:0"><b>Rotinas acumulativas</b> têm uma meta por dia (ex.: 1h de estudo).</p>
       <ul style="margin:0;padding-left:20px;display:grid;gap:4px">
         <li>Não fez? A meta do dia seguinte vira <b>meta + acumulado</b> (1h + 1h = 2h).</li>
         <li>Fez só parte? Registre o que fez (ex.: +30min) e só o resto acumula.</li>
         <li>Fez a mais? O excedente vira <b>saldo</b>. Use o botão <i>"Usar saldo"</i> para cobrir uma pendência quando quiser (ou ative o uso automático na rotina).</li>
+        <li>Use o <b>cronômetro</b> enquanto faz a atividade: ao atingir a meta você recebe um aviso para parar — ou continua e o extra vira saldo.</li>
         <li>Imprevisto? <i>Dispensar este dia</i> zera a meta só daquele dia; <i>Pausar</i> congela a rotina por vários dias.</li>
         <li>Esqueceu de marcar ontem? Volte para o dia (←) e registre lá — tudo é recalculado.</li>
       </ul>
@@ -1019,7 +1678,13 @@ function openHelp() {
 }
 
 document.addEventListener("keydown", (ev) => {
-  if (ev.key === "Escape") closeMenu();
+  if (ev.key === "Escape") {
+    closeMenu();
+    if (ev.target.closest("[data-sub-form]")) {
+      state.addingSubFor = null;
+      renderTasks();
+    }
+  }
   if (modal.el.open || ev.ctrlKey || ev.metaKey || ev.altKey) return;
   if (ev.target.closest("input, textarea, select")) return;
   if (ev.key === "ArrowLeft") setView(addDays(state.date, -1));
@@ -1039,6 +1704,8 @@ setInterval(() => {
     state.localDay = now;
     load();
   }
+  checkEndOfDay();
 }, 30000);
+setInterval(tick, 1000);
 
-load();
+load().then(checkEndOfDay);

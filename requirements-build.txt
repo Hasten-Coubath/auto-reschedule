@@ -1,0 +1,2 @@
+# Só é necessário para gerar o executável (.exe). O app em si não tem dependências.
+pyinstaller>=6.0

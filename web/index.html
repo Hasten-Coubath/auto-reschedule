@@ -5,7 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="author" content="Hasten-Coubath">
   <title>Auto Reschedule</title>
-  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <meta name="theme-color" content="#4f46e5">
+  <!-- "?v=" força o navegador a trocar o ícone guardado em cache quando ele muda -->
+  <link rel="icon" href="icon.ico?v=2" sizes="16x16 32x32 48x48">
+  <link rel="icon" href="icon.svg?v=2" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon-192.png?v=2">
+  <link rel="manifest" href="manifest.webmanifest">
   <link rel="stylesheet" href="styles.css">
   <script>
     // Aplica o tema salvo antes de desenhar a página (evita "piscar").
@@ -18,7 +23,7 @@
 <body>
   <header class="topbar">
     <div class="brand">
-      <img src="icon.svg" alt="" width="34" height="34">
+      <img src="icon.svg?v=2" alt="" width="34" height="34">
       <div>
         <h1>Auto Reschedule</h1>
         <p class="tagline">O que fica para trás vem junto.</p>
@@ -41,6 +46,7 @@
     </nav>
 
     <div class="top-actions">
+      <button id="timer-pill" class="timer-pill" title="Cronômetro ligado — clique para ver" hidden></button>
       <button id="theme-toggle" class="icon-btn" title="Alternar tema claro/escuro" aria-label="Alternar tema">
         <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 0 0 16z" class="fill"/></svg>
       </button>
@@ -73,10 +79,20 @@
         </div>
       </div>
       <form id="task-form" class="task-form" autocomplete="off">
-        <input id="task-title" placeholder="Adicionar tarefa… (Enter para salvar)" maxlength="200" required>
+        <input id="task-title" placeholder="Adicionar tarefa… (ex.: Entregar trabalho #faculdade !alta)" maxlength="200" required
+               title="Dica: #etiqueta adiciona uma etiqueta; !alta ou !baixa define a prioridade">
         <input id="task-date" type="date" title="Data da tarefa" aria-label="Data da tarefa">
+        <select id="task-priority" title="Prioridade" aria-label="Prioridade">
+          <option value="normal">Normal</option>
+          <option value="high">Alta</option>
+          <option value="low">Baixa</option>
+        </select>
         <button class="btn primary" type="submit">Adicionar</button>
+        <button class="icon-btn" type="button" id="task-more" title="Mais opções (repetição, subtarefas, etiquetas…)" aria-label="Mais opções">
+          <svg viewBox="0 0 24 24"><path d="M4 6h10M4 12h16M4 18h10M18 4v4M16 6h4"/></svg>
+        </button>
       </form>
+      <div id="tag-filter" class="tag-filter" hidden></div>
       <ul id="task-list" class="task-list"></ul>
     </section>
   </main>

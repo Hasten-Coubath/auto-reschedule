@@ -11,12 +11,30 @@ from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 BACKUPS_TO_KEEP = 14
 
 
 def empty_data() -> dict:
-    return {"version": SCHEMA_VERSION, "tasks": [], "routines": []}
+    return {"version": SCHEMA_VERSION, "tasks": [], "routines": [], "settings": {}}
+
+
+def migrate(data: dict) -> dict:
+    """Completa arquivos de versões anteriores com os campos novos."""
+    data.setdefault("tasks", [])
+    data.setdefault("routines", [])
+    data.setdefault("settings", {})
+    for task in data["tasks"]:
+        task.setdefault("priority", "normal")
+        task.setdefault("tags", [])
+        task.setdefault("subtasks", [])
+        task.setdefault("repeat", None)
+        task.setdefault("completions", {})
+    for routine in data["routines"]:
+        routine.setdefault("pauses", [])
+        routine.setdefault("timer", None)
+    data["version"] = SCHEMA_VERSION
+    return data
 
 
 class Store:
@@ -47,10 +65,7 @@ class Store:
             self.path.rename(broken)
             print(f"[aviso] {self.path.name} estava corrompido e foi renomeado para {broken.name}")
             return empty_data()
-        data.setdefault("version", SCHEMA_VERSION)
-        data.setdefault("tasks", [])
-        data.setdefault("routines", [])
-        return data
+        return migrate(data)
 
     @contextmanager
     def read(self):
