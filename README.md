@@ -97,40 +97,40 @@ Ele roda **inteiramente no seu computador**: um pequeno servidor local em Python
 ## ✨ Funcionalidades
 
 **Tarefas**
-- ✅ Criar tarefas com data, anotações, **prioridade** e **etiquetas**.
-- ⏭️ Tarefa não concluída **passa sozinha para o dia seguinte** (e para o outro, e para o outro…) até ser marcada.
-- 🏷️ Etiqueta "**Adiada há N dias · desde dd/mm**" para você ver o que está enrolando.
-- ⚡ Criação rápida: digite `Entregar trabalho #faculdade !alta` e a tarefa já sai com etiqueta e prioridade.
-- 🧩 **Subtarefas** com progresso (`2/3`). Marcar todas conclui a tarefa; desmarcar uma reabre.
-- 🔁 **Tarefas recorrentes simples**: toda semana em dias escolhidos, todo mês num dia fixo ou a cada N dias, com data final opcional.
-- 🔎 **Filtro por etiqueta** com um clique.
-- ✏️ Editar, reabrir, excluir e adiar manualmente (mudando a data).
-- 🏁 Concluir antes do prazo: a tarefa é registrada no dia em que foi feita.
+- Criar tarefas com data, anotações, **prioridade** e **etiquetas**.
+- Tarefa não concluída **passa sozinha para o dia seguinte** (e para o outro, e para o outro…) até ser marcada.
+- Etiqueta "**Adiada há N dias · desde dd/mm**" para você ver o que está enrolando.
+- Criação rápida: digite `Entregar trabalho #faculdade !alta` e a tarefa já sai com etiqueta e prioridade.
+- **Subtarefas** com progresso (`2/3`). Marcar todas conclui a tarefa; desmarcar uma reabre.
+- **Tarefas recorrentes simples**: toda semana em dias escolhidos, todo mês num dia fixo ou a cada N dias, com data final opcional.
+- **Filtro por etiqueta** com um clique.
+- Editar, reabrir, excluir e adiar manualmente (mudando a data).
+- Concluir antes do prazo: a tarefa é registrada no dia em que foi feita.
 
 **Rotinas acumulativas**
-- ⏱️ Meta diária em **tempo** (`1h`, `30min`, `1h30`…) ou em **quantidade** (páginas, exercícios, questões…).
-- 📈 **Acúmulo automático**: o que faltar hoje soma na meta de amanhã.
-- ➖ **Abater parte**: registre o quanto fez (`+15min`, `+30min`, `+1h` ou qualquer valor) e só o restante acumula.
-- 💰 **Saldo**: fez a mais? O excedente fica guardado. Gaste quando quiser com o botão **"Usar saldo"** (total ou parcial) — ou ative o **uso automático**.
-- ⏲️ **Cronômetro** com pausar/continuar, aviso ao atingir a meta e correção do tempo antes de registrar.
-- 📅 **Dias da semana**: escolha em quais dias a meta vale (todos, seg–sex, fins de semana ou qualquer combinação).
-- 🛑 **Dispensar um dia** (imprevisto), **pausar** a rotina (férias, doença) e **limite de acúmulo** opcional.
-- 🔁 Mudar a meta **não reescreve o passado**: a nova meta vale a partir da data que você escolher.
-- 📊 **Histórico** dia a dia (meta, acumulado, feito, saldo usado, dívida, saldo) com opção de desfazer qualquer registro.
-- 🟩 Mini-calendário dos **últimos 7 dias** em cada rotina.
+- Meta diária em **tempo** (`1h`, `30min`, `1h30`…) ou em **quantidade** (páginas, exercícios, questões…).
+- **Acúmulo automático**: o que faltar hoje soma na meta de amanhã.
+- **Abater parte**: registre o quanto fez (`+15min`, `+30min`, `+1h` ou qualquer valor) e só o restante acumula.
+- **Saldo**: fez a mais? O excedente fica guardado. Gaste quando quiser com o botão **"Usar saldo"** (total ou parcial) — ou ative o **uso automático**.
+- **Cronômetro** com pausar/continuar, aviso ao atingir a meta e correção do tempo antes de registrar.
+- **Dias da semana**: escolha em quais dias a meta vale (todos, seg–sex, fins de semana ou qualquer combinação).
+- **Dispensar um dia** (imprevisto), **pausar** a rotina (férias, doença) e **limite de acúmulo** opcional.
+- Mudar a meta **não reescreve o passado**: a nova meta vale a partir da data que você escolher.
+- **Histórico** dia a dia (meta, acumulado, feito, saldo usado, dívida, saldo) com opção de desfazer qualquer registro.
+- Mini-calendário dos **últimos 7 dias** em cada rotina.
 
 **Geral**
-- 🗓️ Navegue entre os dias (← →): veja o **passado** (e registre o que esqueceu de marcar) ou a **previsão** de dias futuros.
-- 🔔 **Notificações na área de trabalho**: lembrete de fim do dia (horário configurável) e aviso de meta do cronômetro, com som opcional.
-- 🌗 Tema claro e escuro (segue o sistema, com botão para alternar).
-- 💾 Dados em um arquivo JSON local, com **gravação atômica** e **backup automático diário** (últimos 14 dias).
-- 📤 Exportar backup com um clique.
-- 🖥️ Atalho com ícone na Área de Trabalho e no Menu Iniciar, e opção de **executável `.exe`**.
-- 🔌 **Zero dependências**: só precisa do Python instalado (ou nem isso, usando o `.exe`).
+- Navegue entre os dias (← →): veja o **passado** (e registre o que esqueceu de marcar) ou a **previsão** de dias futuros.
+- **Notificações na área de trabalho**: lembrete de fim do dia (horário configurável) e aviso de meta do cronômetro, com som opcional.
+- Tema claro e escuro (segue o sistema, com botão para alternar).
+- Dados em um arquivo JSON local, com **gravação atômica** e **backup automático diário** (últimos 14 dias).
+- Exportar backup com um clique.
+- Atalho com ícone na Área de Trabalho e no Menu Iniciar, e opção de **executável `.exe`**.
+- **Zero dependências**: só precisa do Python instalado (ou nem isso, usando o `.exe`).
 
 ---
 
-## 📐 Como funciona (as regras)
+## Como funciona (as regras)
 
 > O app **não precisa ficar aberto** para "virar o dia". Tudo é recalculado a partir dos seus registros sempre que você abre a tela. Pode ficar uma semana sem abrir que, ao voltar, as contas estarão certas.
 
@@ -283,7 +283,7 @@ Configure em `⋯ → Configurações e avisos`:
 
 ---
 
-## 🧰 Requisitos
+## Requisitos
 
 - **Python 3.9 ou mais recente**: [python.org/downloads](https://www.python.org/downloads/)
   - No Windows, marque a opção **"Add python.exe to PATH"** durante a instalação.
@@ -294,7 +294,7 @@ Não há `pip install` para usar o app: o projeto usa apenas a biblioteca padrã
 
 ---
 
-## 📥 Instalação
+## Instalação
 
 ```bash
 git clone https://github.com/Hasten-Coubath/auto-reschedule.git
@@ -305,7 +305,7 @@ Ou baixe o ZIP pelo botão **Code → Download ZIP** no GitHub e extraia em qual
 
 ---
 
-## ▶️ Como usar
+## Como usar
 
 ### Windows
 
@@ -358,7 +358,7 @@ Depois de iniciado, o app também pode ser acessado em **http://127.0.0.1:8765**
 
 ---
 
-## 🖥️ Atalho com ícone e iniciar junto com o Windows
+## Atalho com ícone e iniciar junto com o Windows
 
 **Criar atalho com o ícone do app** (Área de Trabalho + Menu Iniciar):
 
@@ -377,7 +377,7 @@ Depois de iniciado, o app também pode ser acessado em **http://127.0.0.1:8765**
 
 ---
 
-## 📦 Gerar o executável (.exe)
+## Gerar o executável (.exe)
 
 Dá para empacotar o app em **um único arquivo `AutoReschedule.exe`**, que roda em qualquer Windows **sem Python instalado**:
 
@@ -399,7 +399,7 @@ Como o executável funciona:
 
 ---
 
-## 💾 Onde ficam os dados e como fazer backup
+## Onde ficam os dados e como fazer backup
 
 | Item | Local |
 |---|---|
